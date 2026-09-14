@@ -23,6 +23,23 @@
 * 想构建 4.x 里的**其他版本**：`./build.sh all 4.3.0`，或在 GitHub Actions 手动触发时
   从下拉框选 4.3.0 / 4.2.1 / 4.2.0 / 4.1.0（CNB 上改 `.cnb.yml` 的 `KK_VERSION`）
 
+### 已验证构建的版本
+
+以下版本已在 GitHub Actions 上实际跑通「编译 → 打包 → 发布 → 镜像构建 → 冒烟测试」，
+每版都有独立 Release：
+
+| 版本 | Release | 发行包 |
+| --- | --- | --- |
+| 4.4.0 | [`latest-4.x`](https://github.com/JackCh3n/kkfile-build/releases/tag/latest-4.x) | `kkfileview-4.4.0.tar.gz` / `kkFileView-4.4.0.jar` |
+| 4.3.0 | [`v4.3.0`](https://github.com/JackCh3n/kkfile-build/releases/tag/v4.3.0) | `kkfileview-4.3.0.tar.gz` / `kkFileView-4.3.0.jar` |
+| 4.2.1 | [`v4.2.1`](https://github.com/JackCh3n/kkfile-build/releases/tag/v4.2.1) | `kkfileview-4.2.1.tar.gz` / `kkFileView-4.2.1.jar` |
+| 4.2.0 | [`v4.2.0`](https://github.com/JackCh3n/kkfile-build/releases/tag/v4.2.0) | `kkfileview-4.2.0.tar.gz` / `kkFileView-4.2.0.jar` |
+| 4.1.0 | [`v4.1.0`](https://github.com/JackCh3n/kkfile-build/releases/tag/v4.1.0) | `kkfileview-4.1.0.tar.gz` / `kkFileView-4.1.0.jar` |
+
+> 小版本差异提示：4.1.0 没有 `/` 映射（只有 `/index`），所以冒烟探活路径里同时
+> 保留了 `/index`；4.1.0 还多一个 `office-plugin` 模块（依赖 `sigar`，走它自己声明的
+> JBoss 仓库），本流水线已验证其可编译。
+
 ---
 
 ## 目录

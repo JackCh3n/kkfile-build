@@ -410,7 +410,7 @@ print_summary() {
   printf '  环境变量   : %s\n' "$ENV_FILE"
   printf '  数据目录   : %s\n' "$DATA_DIR"
   printf '  访问地址   : http://<服务器IP>:%s%s\n' "$PORT" "$ctx"
-  printf '  健康检查   : http://127.0.0.1:%s%s（首页，HTTP 2xx 即就绪）\n' "$PORT" "$ctx"
+  printf '  演示页     : http://127.0.0.1:%s%s（4.2.0 起/5.x 为 /，4.1.0 为 /index）\n' "$PORT" "$ctx"
   printf '  启动服务   : systemctl start %s\n' "$UNIT_NAME"
   printf '  查看日志   : journalctl -u %s -f\n' "$UNIT_NAME"
   printf '  手工启动   : %s/bin/kkfileview-run.sh\n' "$PREFIX"
