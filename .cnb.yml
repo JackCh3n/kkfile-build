@@ -269,10 +269,11 @@
         - "./dist/BUILD-INFO.txt"
 
   # ── 镜像：各架构原生构建并推送本架构 tag ────────────────────────────────
-  # 用 docker:27-cli 作为该 stage 的镜像，确保有 docker CLI；
-  # 守护进程由流水线级 services: [docker] 提供，并已自动登录制品库。
+  # 注意：这里**故意不覆盖 image**，直接跑在流水线环境镜像里 —— CNB 会把 docker CLI
+  # 与 dind 连接注入到该镜像（之前的单架构版本就是这样推送成功的）。
+  # 曾试过加 stage 级 `image: docker:27-cli`，那个容器里 docker CLI 接不上守护进程，
+  # 会让阶段长时间卡住，所以改回环境镜像。
   - name: push-image-arch
-    image: docker:27-cli
     script: |
       set -e
       REG="${CNB_DOCKER_REGISTRY:-docker.cnb.cool}"
@@ -283,71 +284,79 @@
       test -f Dockerfile.runtime || { echo "!!! 未在当前目录找到 Dockerfile.runtime"; ls -la; exit 1; }
       test -f "dist/kkfileview-${RELEASE_VERSION}.tar.gz" || { echo "!!! 缺少 dist/kkfileview-${RELEASE_VERSION}.tar.gz"; ls -la dist; exit 1; }
 
-      # 显式登录（services: docker 通常已自动登录，这里作为兜底，失败不致命）
+      # 连通性自检：连不上就立刻失败，避免后面长时间挂住
+      echo ">>> docker CLI: $(docker --version 2>&1 | head -1)"
+      docker info --format '>>> docker daemon: {{.ServerVersion}} / {{.OSType}}/{{.Architecture}}'         || { echo "!!! 无法连接 docker 守护进程（dind 未注入？）"; exit 1; }
+
       if [ -n "${CNB_TOKEN:-}" ]; then
-        echo "${CNB_TOKEN}" | docker login -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin "${REG}" \
-          || echo ">>> 警告：docker login 失败，继续尝试推送（可能已自动登录）"
+        echo "${CNB_TOKEN}" | docker login -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin "${REG}"           || echo ">>> 警告：docker login 失败，继续尝试推送（可能已自动登录）"
       fi
 
-      docker build \
-        -f Dockerfile.runtime \
-        --build-arg "KK_VERSION=${RELEASE_VERSION}" \
-        -t "${IMG}:${RELEASE_VERSION}-${ARCH}" \
-        -t "${IMG}:${RELEASE_TAG}-${ARCH}" \
-        .
+      # 30 分钟硬超时：把「卡住」变成「明确失败」
+      timeout 1800 docker build         -f Dockerfile.runtime         --build-arg "KK_VERSION=${RELEASE_VERSION}"         -t "${IMG}:${RELEASE_VERSION}-${ARCH}"         -t "${IMG}:${RELEASE_TAG}-${ARCH}"         . || { echo "!!! docker build 失败或超过 30 分钟超时"; exit 1; }
       docker push "${IMG}:${RELEASE_VERSION}-${ARCH}"
       docker push "${IMG}:${RELEASE_TAG}-${ARCH}"
       echo ">>> ${ARCH} 镜像推送完成"
 
   # ── 合并多架构 manifest ─────────────────────────────────────────────────
-  # 两条流水线都会执行：等待「对方架构」的 tag 出现后合并（先到先合，内容一致，幂等）；
+  # 两条流水线都会执行：等对方架构的 tag 出现后合并（先到先合、内容一致、幂等）；
   # 等待超时（对方失败）则退化为发布本架构单架构镜像，不让整条流水线变红。
   - name: merge-manifest
-    image: docker:27-cli
     script: |
       set -e
       REG="${CNB_DOCKER_REGISTRY:-docker.cnb.cool}"
       IMG="${REG}/${CNB_REPO_SLUG_LOWERCASE}"
       ARCH="${KK_IMAGE_ARCH}"
       if [ "$ARCH" = "amd64" ]; then OTHER="arm64"; else OTHER="amd64"; fi
+      echo ">>> 合并 manifest：本架构 ${ARCH}，对端 ${OTHER}"
 
       if [ -n "${CNB_TOKEN:-}" ]; then
-        echo "${CNB_TOKEN}" | docker login -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin "${REG}" >/dev/null 2>&1 \
-          || echo ">>> 警告：docker login 失败"
+        echo "${CNB_TOKEN}" | docker login -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin "${REG}" >/dev/null 2>&1           || echo ">>> 警告：docker login 失败"
       fi
+
+      # 探测 tag 是否存在：buildx -> docker manifest -> docker pull 三级回退
+      tag_exists() {
+        local ref="$1"
+        if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then return 0; fi
+        if DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$ref" >/dev/null 2>&1; then return 0; fi
+        docker pull -q "$ref" >/dev/null 2>&1
+      }
+
+      # 把若干分架构 tag 合并成多架构 manifest（先 buildx，再 docker manifest）
+      merge_tags() {
+        local target="$1"; shift
+        if docker buildx imagetools create -t "$target" "$@" >/dev/null 2>&1; then
+          echo ">>> 合并成功（imagetools）: ${target}"; return 0
+        fi
+        if DOCKER_CLI_EXPERIMENTAL=enabled docker manifest create "$target" "$@" >/dev/null 2>&1            && DOCKER_CLI_EXPERIMENTAL=enabled docker manifest push "$target" >/dev/null 2>&1; then
+          echo ">>> 合并成功（docker manifest）: ${target}"; return 0
+        fi
+        echo ">>> 警告：当前环境无法合并多架构 manifest，保留分架构 tag: $*"
+        return 1
+      }
 
       wait_other() {
         local i
-        for i in $(seq 1 60); do
-          if docker buildx imagetools inspect "${IMG}:${RELEASE_VERSION}-${OTHER}" >/dev/null 2>&1; then
-            echo ">>> 已发现 ${OTHER} 架构镜像（第 ${i} 次探测）"
-            return 0
+        for i in $(seq 1 40); do
+          if tag_exists "${IMG}:${RELEASE_VERSION}-${OTHER}"; then
+            echo ">>> 已发现 ${OTHER} 架构镜像（第 ${i} 次探测）"; return 0
           fi
-          echo ">>> 等待 ${OTHER} 架构镜像（第 ${i}/60 次，30s 一次）"
+          echo ">>> 等待 ${OTHER} 架构镜像（第 ${i}/40 次，30s 一次）"
           sleep 30
         done
         return 1
       }
 
-      # imagetools create 幂等；两条流水线可能同时合并（内容一致），失败也不算错
-      merge() {
-        local target="$1" srcs="$2"
-        # shellcheck disable=SC2086
-        docker buildx imagetools create -t "$target" $srcs \
-          || { sleep 5; docker buildx imagetools create -t "$target" $srcs \
-               || echo ">>> 警告：$target 合并失败（若对方流水线已合并且内容一致，可忽略）"; }
-      }
-
       if wait_other; then
-        echo ">>> 合并多架构 manifest"
-        merge "${IMG}:${RELEASE_VERSION}" "${IMG}:${RELEASE_VERSION}-amd64 ${IMG}:${RELEASE_VERSION}-arm64"
-        merge "${IMG}:${RELEASE_TAG}" "${IMG}:${RELEASE_TAG}-amd64 ${IMG}:${RELEASE_TAG}-arm64"
-        docker buildx imagetools inspect "${IMG}:${RELEASE_VERSION}" || true
+        merge_tags "${IMG}:${RELEASE_VERSION}" "${IMG}:${RELEASE_VERSION}-amd64" "${IMG}:${RELEASE_VERSION}-arm64" || true
+        merge_tags "${IMG}:${RELEASE_TAG}" "${IMG}:${RELEASE_TAG}-amd64" "${IMG}:${RELEASE_TAG}-arm64" || true
       else
-        echo ">>> 警告：等待 ${OTHER} 架构超时（该架构流水线可能失败），改为发布单架构镜像（${ARCH}）"
-        merge "${IMG}:${RELEASE_VERSION}" "${IMG}:${RELEASE_VERSION}-${ARCH}"
-        merge "${IMG}:${RELEASE_TAG}" "${IMG}:${RELEASE_TAG}-${ARCH}"
+        echo ">>> 警告：等待 ${OTHER} 架构超时（该架构流水线可能失败），改为发布本架构单架构镜像"
+        # 本架构镜像已在同一个 dind 里，直接重打 tag 推送，不必再拉一遍
+        { docker tag "${IMG}:${RELEASE_VERSION}-${ARCH}" "${IMG}:${RELEASE_VERSION}" && docker push "${IMG}:${RELEASE_VERSION}"; }           || merge_tags "${IMG}:${RELEASE_VERSION}" "${IMG}:${RELEASE_VERSION}-${ARCH}" || true
+        { docker tag "${IMG}:${RELEASE_TAG}-${ARCH}" "${IMG}:${RELEASE_TAG}" && docker push "${IMG}:${RELEASE_TAG}"; }           || merge_tags "${IMG}:${RELEASE_TAG}" "${IMG}:${RELEASE_TAG}-${ARCH}" || true
       fi
+      echo ">>> merge-manifest 结束"
 
   - name: summary
     script: |
