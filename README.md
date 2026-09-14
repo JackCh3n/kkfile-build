@@ -8,6 +8,21 @@
 > 因此产物永远对应一个明确的源码 commit（记录在 `BUILD-INFO.txt` 里）。
 > 上游项目：https://github.com/kekingcn/kkFileView （Apache-2.0）
 
+## 分支与支持的版本
+
+| 分支 | 版本线 | JDK | 说明 |
+| --- | --- | --- | --- |
+| `main` | 5.x（当前 5.0.2） | 21 | Spring Boot 3.5，有 actuator |
+| **`4.x`（本分支）** | 4.4.0 / 4.3.0 / 4.2.1 / 4.2.0 / 4.1.0 | 8 | Spring Boot 2.4.2，**无 actuator** |
+
+两条版本线的构建体系差异较大（JDK、启动探活方式、发布标签），因此分开维护：
+
+* 主线（本分支的 push）滚动发布到 Release `latest-4.x`，镜像打 `latest-4.x` 与 `<版本>`；
+  5.x 线用 `latest`，两者互不覆盖
+* 稳定版打 tag `v4.4.0` 等，发布到同名 Release
+* 想构建 4.x 里的**其他版本**：`./build.sh all 4.3.0`，或在 GitHub Actions 手动触发时
+  从下拉框选 4.3.0 / 4.2.1 / 4.2.0 / 4.1.0（CNB 上改 `.cnb.yml` 的 `KK_VERSION`）
+
 ---
 
 ## 目录
@@ -41,11 +56,11 @@
 发行包解包后的结构：
 
 ```
-kkFileView-5.0.2/
-├── bin/                      # 启动脚本 + kkFileView-5.0.2.jar
+kkFileView-4.4.0/
+├── bin/                      # 启动脚本 + kkFileView-4.4.0.jar
 │   ├── kkfileview-run.sh     # 前台启动包装脚本（systemd ExecStart 用）
 │   ├── startup.sh / shutdown.sh / showlog.sh / dev.sh / install.sh
-│   └── kkFileView-5.0.2.jar
+│   └── kkFileView-4.4.0.jar
 ├── config/application.properties   # 全部配置项都支持 KK_* 环境变量覆盖
 ├── log/
 ├── install.sh                # 本项目的离线安装脚本
@@ -58,14 +73,14 @@ kkFileView-5.0.2/
 
 ### 2. 容器镜像
 
-Ubuntu 24.04 + OpenJDK 21 + LibreOffice（`libreoffice-nogui`）+ 中文字体
+Ubuntu 24.04 + OpenJDK 8 + LibreOffice（`libreoffice-nogui`）+ 中文字体
 （文泉驿 / Noto CJK）+ 时区 `Asia/Shanghai` + locale `zh_CN.UTF-8`，
-以非 root 用户（uid 10001）运行，内置 `HEALTHCHECK`。
+以非 root 用户（uid 10001）运行，内置 `HEALTHCHECK`（4.x 无 actuator，探活用首页 `/`）。
 
 | 来源 | 镜像地址 | 架构 |
 | --- | --- | --- |
-| GitHub Actions | `ghcr.io/jackch3n/kkfile-build:<版本>`（主线另有 `:latest`） | `linux/amd64`（可选含 `linux/arm64`） |
-| CNB | `docker.cnb.cool/jackch3n/kkfile-build:<版本>`（主线另有 `:latest`） | `linux/amd64` + `linux/arm64` |
+| GitHub Actions | `ghcr.io/jackch3n/kkfile-build:<版本>`（主线另有 `:latest-4.x`） | `linux/amd64`（可选含 `linux/arm64`） |
+| CNB | `docker.cnb.cool/jackch3n/kkfile-build:<版本>`（主线另有 `:latest-4.x`） | `linux/amd64` + `linux/arm64` |
 
 ---
 
@@ -77,10 +92,11 @@ Ubuntu 24.04 + OpenJDK 21 + LibreOffice（`libreoffice-nogui`）+ 中文字体
 docker run -d --name kkfileview \
   -p 8012:8012 \
   -v kkfileview-data:/data \
-  ghcr.io/jackch3n/kkfile-build:latest
+  ghcr.io/jackch3n/kkfile-build:latest-4.x
 
 # 打开 http://127.0.0.1:8012/
-curl -fsS http://127.0.0.1:8012/actuator/health
+curl -fsS -o /dev/null -w '%{http_code}
+' http://127.0.0.1:8012/   # 200 即就绪
 ```
 
 ### docker compose
@@ -90,15 +106,15 @@ curl -fsS http://127.0.0.1:8012/actuator/health
 ./build.sh all && docker compose up -d
 
 # 使用 CI 发布的镜像（换成你的仓库地址）
-KK_IMAGE=ghcr.io/jackch3n/kkfile-build:latest docker compose up -d
-KK_IMAGE=docker.cnb.cool/jackch3n/kkfile-build:latest docker compose up -d
+KK_IMAGE=ghcr.io/jackch3n/kkfile-build:latest-4.x docker compose up -d
+KK_IMAGE=docker.cnb.cool/jackch3n/kkfile-build:latest-4.x docker compose up -d
 ```
 
 ### 离线安装（裸机 / 内网）
 
 ```bash
-tar -xzf kkfileview-5.0.2.tar.gz
-cd kkFileView-5.0.2
+tar -xzf kkfileview-4.4.0.tar.gz
+cd kkFileView-4.4.0
 
 # 先自检（不需要 root，不改动系统）
 ./install.sh --check
@@ -113,7 +129,7 @@ journalctl -u kkfileview -f
 也可以直接从压缩包安装：
 
 ```bash
-sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
+sudo ./install.sh --from /path/to/kkfileview-4.4.0.tar.gz --start
 ```
 
 `install.sh` 常用参数：
@@ -125,14 +141,14 @@ sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
 | `--data-dir DIR` | 转换文件与预览文件目录（默认 `/var/lib/kkfileview`） |
 | `--user NAME` | 运行用户（默认 `kkfileview`） |
 | `--port N` | 服务端口（默认 `8012`） |
-| `--java-home DIR` | 指定 JDK 21（默认自动探测 `JAVA_HOME` / `PATH` / `/usr/lib/jvm`） |
+| `--java-home DIR` | 指定 JDK 8（默认自动探测 `JAVA_HOME` / `PATH` / `/usr/lib/jvm`） |
 | `--install-office` | 未检测到 LibreOffice 时调用包内 `bin/install.sh` 联网安装 |
 | `--no-service` | 只装文件，不创建 systemd 服务 |
 | `--force` | `--prefix` 指向的目录非空且不像 kkFileView 安装目录时，允许强行覆盖 |
 | `--uninstall [--purge]` | 卸载（默认保留数据目录；`--purge` 一并删除） |
 
-> **前置条件**：JDK 21+ 与 LibreOffice 缺一不可。
-> `apt-get install -y openjdk-21-jre libreoffice-nogui fonts-wqy-microhei fonts-wqy-zenhei`
+> **前置条件**：JDK 8+ 与 LibreOffice 缺一不可。
+> `apt-get install -y openjdk-8-jre libreoffice-nogui fonts-wqy-microhei fonts-wqy-zenhei`
 
 ---
 
@@ -140,7 +156,7 @@ sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
 
 ### 前置条件
 
-* Docker（本地构建镜像用）；或 JDK 21 + Maven 3.9+（`native` 模式）
+* Docker（本地构建镜像用）；或 JDK 8 + Maven 3.9+（`native` 模式）
 * 代码里已把 Maven 源、APT 源都做成可配置项，国内网络无需改脚本
 
 ### 常用命令
@@ -159,15 +175,15 @@ sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
 示例：
 
 ```bash
-./build.sh all                        # 默认 5.0.2，全流程
+./build.sh all                        # 默认 4.4.0，全流程
 ./build.sh build 5.0.1 v5.0.1         # 指定版本与 git ref
-./build.sh image 5.0.2 linux/amd64    # 只构建 amd64 镜像
-./build.sh native 5.0.2 central       # 用 Maven 中央仓库原生编译
+./build.sh image 4.4.0 linux/amd64    # 只构建 amd64 镜像
+./build.sh native 4.4.0 central       # 用 Maven 中央仓库原生编译
 ```
 
 ### 只用编译镜像
 
-编译镜像里就是「Maven 3.9 + Temurin JDK 21 + git」，可以单独用：
+编译镜像里就是「Maven 3.9 + Temurin JDK 8 + git」，可以单独用：
 
 ```bash
 docker build -t kkfileview-builder:local -f Dockerfile .
@@ -175,14 +191,14 @@ docker run --rm \
   -v "$PWD/dist:/opt/dist" \
   -v "$HOME/.m2:/root/.m2" \
   kkfileview-builder:local \
-  --version 5.0.2 --output /opt/dist
+  --version 4.4.0 --output /opt/dist
 ```
 
 `build-kkfileview.sh` 主要参数：
 
 | 参数 | 说明 |
 | --- | --- |
-| `--version VER` | 版本号（如 `5.0.2`），默认据此推导 git tag `v5.0.2` |
+| `--version VER` | 版本号（如 `4.4.0`），默认据此推导 git tag `v4.4.0` |
 | `--ref REF` | 显式指定 git ref（tag / 分支 / commit），优先级高于 `--version` |
 | `--repo-url URLS` | 候选源码地址，空格或逗号分隔，按序尝试（默认 GitHub + Gitee 双源） |
 | `--maven-mirror NAME` | `aliyun`(默认) / `central` / `huawei` / `tencent` / `none` / 自定义 URL |
@@ -195,12 +211,12 @@ docker run --rm \
 
 1. **工具链检查**：JDK ≥ 21（项目 `maven.compiler.release=21`）
 2. **版本一致性**：`--version` 与源码 `pom.xml` 版本不一致直接报错，
-   避免产出「文件名写 5.0.2、里面其实是别的版本」
+   避免产出「文件名写 4.4.0、里面其实是别的版本」
 3. **静态校验**：`unzip -t` 校验 jar 完整性、确认 `BOOT-INF/classes/cn/keking/ServerMain.class`
    与 `BOOT-INF/lib/` 存在、jar 体积下限
-4. **运行时冒烟测试**（`build.sh smoke` / CI）：起容器并探活 —— 5.x 走
-   `/actuator/health`（`status=UP`），4.x 没有 actuator 依赖则退化为访问首页 `/`（HTTP 2xx），
-   并打印日志里的「服务启动完成」作为佐证
+4. **运行时冒烟测试**（`build.sh smoke` / CI）：起容器并探活 —— 4.x 没有 actuator
+   依赖，用首页 `/`（HTTP 2xx）作为就绪判据（`HEALTH_PATHS` 里也保留了
+   `/actuator/health`，便于同一个脚本兼容 5.x），并打印日志里的「服务启动完成」作为佐证
 
 ---
 
@@ -212,7 +228,7 @@ docker run --rm \
 
 | 触发 | 场景 | 源码 ref | Release tag | 镜像 tag | 平台 |
 | --- | --- | --- | --- | --- | --- |
-| push `main` / `master` | 主线 | `v<KK_VERSION>` | `latest`（滚动更新） | `<版本>`、`v<版本>`、`latest` | `linux/amd64,linux/arm64` |
+| push 本分支（`4.x`） | 主线 | `v<KK_VERSION>` | `latest-4.x`（滚动更新） | `<版本>`、`v<版本>`、`latest-4.x` | `linux/amd64,linux/arm64` |
 | push tag `v*` | 稳定版 | 该 tag | 同名 tag（固化） | `<版本>`、`v<版本>` | `linux/amd64,linux/arm64` |
 | `workflow_dispatch` | 手动 | 可指定 | `v<版本>` 或指定 ref | `<版本>`、`v<版本>` | 可选 |
 
@@ -220,7 +236,7 @@ docker run --rm \
 `image` 构建并推送 GHCR → `smoke` 拉取刚推送的镜像起容器探活；
 `release` 与 `image` 并行，负责把发行包发到 GitHub Releases。
 
-`KK_VERSION` 在 workflow 的 `env` 里（默认 `5.0.2`）。**主线也固定从
+`KK_VERSION` 在 workflow 的 `env` 里（默认 `4.4.0`）。**主线也固定从
 `v<KK_VERSION>` 这个 tag 取源码**，保证「同一个版本号永远编译同一份代码」；
 上游发布新版本时改这一个变量即可。
 
@@ -256,7 +272,7 @@ Actions → build-kkfileview → Run workflow，可指定：
 
 | 触发 | 场景 | 源码 ref | Release tag | 镜像 tag |
 | --- | --- | --- | --- | --- |
-| push `main` / `master` | 主线 | `v<KK_VERSION>` | `latest`（滚动更新） | `<版本>`、`latest`（多架构） |
+| push 本分支（`4.x`） | 主线 | `v<KK_VERSION>` | `latest-4.x`（滚动更新） | `<版本>`、`latest-4.x`（多架构） |
 | push tag `v*` | 稳定版 | 该 tag | 同名 tag | `<版本>`、`<tag>`（多架构） |
 
 每次触发会起**两条并行流水线**（amd64 / arm64 各一条），共用的阶段链是：
@@ -304,8 +320,8 @@ privileged/binfmt，稳定性没保证。两条原生流水线并行只要约 10
 日常推送（`origin` = GitHub，`cnb` = CNB）：
 
 ```bash
-git push origin main        # 触发 GitHub Actions
-git push cnb main           # 触发 CNB 流水线
+git push origin 4.x         # 触发 GitHub Actions
+git push cnb 4.x            # 触发 CNB 流水线
 # 一次推两端也可以：
 git remote add origin https://github.com/JackCh3n/kkfile-build.git
 git remote add cnb    https://cnb.cool/jackch3n/kkfile-build.git
@@ -313,7 +329,7 @@ git remote add cnb    https://cnb.cool/jackch3n/kkfile-build.git
 
 ### GitHub 侧
 
-* 推送 `main` 即触发 `.github/workflows/build.yml`，无需额外配置
+* 推送 `4.x` 分支即触发 `.github/workflows/build.yml`，无需额外配置
   （workflow 已声明 `permissions: contents: write, packages: write`）
 * 镜像地址为 `ghcr.io/jackch3n/kkfile-build`（镜像名与本仓库同名）；
   首次发布后到仓库的 Packages 页面把镜像可见性改成 public（如需公开）
@@ -324,14 +340,14 @@ git remote add cnb    https://cnb.cool/jackch3n/kkfile-build.git
 
 * 推送代码后，平台会自动读取 `.cnb.yml` 并执行，
   无需配置任何密钥（`CNB_TOKEN` 由平台注入）
-* 推送 `main` / `master` 触发主线，推送 tag `v*` 触发稳定版
+* 推送 `4.x` 分支触发主线，推送 tag `v*` 触发稳定版
 * 镜像地址为 `docker.cnb.cool/jackch3n/kkfile-build`
 
 ### 发布一个稳定版
 
 ```bash
-git tag v5.0.2
-git push origin v5.0.2
+git tag v4.4.0
+git push origin v4.4.0
 ```
 
 ### 跟随上游升级版本
@@ -364,17 +380,21 @@ git push origin v5.0.2
 | `KK_FILE_DIR` | `<安装目录>/file` | 转换后文件存放目录（**需要可写、空间充足**） |
 | `KK_LOCAL_PREVIEW_DIR` | 同 `KK_FILE_DIR` | 本地预览文件目录 |
 | `KK_TRUST_HOST` | `default` | 信任站点白名单，逗号分隔；`default` 表示仅本机测试 |
-| `KK_NOT_TRUST_HOST` | `default` | 不信任站点黑名单（优先级高于白名单） |
-| `KK_OFFICE_PREVIEW_TYPE` | `pdf` | Office 预览模式：`pdf` / `image` |
+| `KK_OFFICE_PREVIEW_TYPE` | `image` | Office 预览模式：`image` / `pdf`（4.x 默认是 image） |
 | `KK_OFFICE_PREVIEW_SWITCH_DISABLED` | `true` | 是否禁止前端切换预览模式 |
-| `KK_OFFICE_WATERMARK` | `false` | 是否加转换水印 |
-| `KK_PROHIBIT` | `exe,dll,dat` | 禁止访问的文件类型 |
-| `KK_CAD_PREVIEW_TYPE` | `svg` | CAD 预览模式 |
+| `KK_MEDIA` / `KK_CONVERTMEDIAS` | 见配置 | 直接预览 / 需要转码的媒体格式清单 |
 | `KK_MEDIA_CONVERT_DISABLE` | `false` | 是否关闭音视频转码 |
 | `KK_BASE_URL` | — | 对外访问地址（反向代理场景建议显式配置） |
-| `KK_CACHE_TYPE` / `KK_SPRING_REDISSON_*` | — | 集群/缓存相关 |
+| `KK_CACHE_ENABLED` / `KK_CACHE_TYPE` / `KK_CACHE_CLEAN_*` | — | 缓存与定时清理 |
+| `KK_SPRING_REDISSON_ADDRESS` / `..._PASSWORD` | — | Redis（Redisson）相关 |
+| `KK_PDF_PRINT_DISABLE` / `KK_PDF_DOWNLOAD_DISABLE` / `KK_PDF_BOOKMARK_DISABLE` 等 | 见配置 | PDF 预览开关 |
+| `KK_TIF_PREVIEW_TYPE` / `KK_SIMTEXT` / `KK_FTP_*` | 见配置 | 其他版本差异项 |
 
-完整清单可直接查 `config/application.properties`（`grep KK_`），共 40+ 项。
+> **各小版本的可配项并不完全一致**（例如 4.1.0 的文件上传开关是
+> `KK_FILE_UPLOAD_ENABLED`，4.2 起改为 `KK_FILE_UPLOAD_DISABLE`；
+> `KK_PROHIBIT`、`KK_CAD_*`、`KK_OFFICE_WATERMARK`、`KK_NOT_TRUST_HOST`
+> 是 4.3/4.4 才有的）。**以你实际构建的那个版本的
+> `config/application.properties` 为准**：解包后 `grep KK_ config/application.properties`。
 
 另外 `JAVA_OPTS` 控制 JVM 参数（默认 `-Xms512m -Xmx2g`），内存要按并发量与
 文档大小调整：大文件转 PDF 是内存消耗大头。
@@ -425,8 +445,8 @@ kkFileView 的 `OfficePluginManager.startOfficeManager()` 是 `@PostConstruct`�
 
 ```
 kkfile-build/
-├── Dockerfile                  # 编译镜像（Maven 3.9 + JDK 21 + git）
-├── Dockerfile.runtime          # 运行时镜像（Ubuntu 24.04 + JRE21 + LibreOffice + 中文字体）
+├── Dockerfile                  # 编译镜像（Maven 3.9 + JDK 8 + git）
+├── Dockerfile.runtime          # 运行时镜像（Ubuntu 24.04 + JRE 8 + LibreOffice + 中文字体）
 ├── Dockerfile.dockerignore     # 编译镜像专用的上下文白名单（只传编译脚本）
 ├── .dockerignore
 ├── build.sh                    # 宿主机一键入口

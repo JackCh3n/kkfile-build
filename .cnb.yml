@@ -25,9 +25,13 @@
 #
 # 场景与版本语义（与 GitHub Actions 保持一致）
 # --------------------------------------------
-#   * main / master 分支 push -> 主线：构建 KK_VERSION 指定的版本（默认 5.0.2，
-#     源码取 tag v5.0.2，保证可复现），滚动发布到 Release tag `latest`
-#   * git tag v*             -> 稳定版：从 tag 解析版本，发布到同名 Release（固化）
+#   * 本分支（4.x 线）push    -> 主线：构建 KK_VERSION 指定的版本（默认 4.4.0，
+#     源码取 tag v4.4.0，保证可复现），滚动发布到 Release tag `latest-4.x`
+#   * git tag v4.x.y         -> 稳定版：从 tag 解析版本，发布到同名 Release（固化）
+#
+# 分支说明：main 分支是 5.x 线（Java 21 / Spring Boot 3.5），本分支是 4.x 线
+# （Java 8 / Spring Boot 2.4.2，且没有 actuator）。两条线构建体系差异较大，
+# 因此各自独立维护，发布标签也分开（latest vs latest-4.x），互不覆盖。
 #
 # ⚠️ tag_push 只匹配 glob "v*"，**不要**用兜底符 `$`：
 #    滚动发布会创建 latest 这个 git tag，用 `$` 会把 latest 也匹配进来，
@@ -73,14 +77,14 @@
 # KK_IMAGE_ARCH 用于在共用 stages 里区分架构（决定推哪个 arch tag、
 # 以及由哪条流水线负责发布 Release）
 .vars-amd64: &vars-amd64
-  KK_VERSION: "5.0.2"
+  KK_VERSION: "4.4.0"
   KK_IMAGE_ARCH: "amd64"
   MAVEN_MIRROR: aliyun
   # CNB runner 在国内，Gitee 镜像优先、GitHub 兜底
   KK_REPO_URLS: "https://gitee.com/kekingcn/file-online-preview.git https://github.com/kekingcn/kkFileView.git"
 
 .vars-arm64: &vars-arm64
-  KK_VERSION: "5.0.2"
+  KK_VERSION: "4.4.0"
   KK_IMAGE_ARCH: "arm64"
   MAVEN_MIRROR: aliyun
   KK_REPO_URLS: "https://gitee.com/kekingcn/file-online-preview.git https://github.com/kekingcn/kkFileView.git"
@@ -96,12 +100,12 @@
         case "$REF" in
           v*) VERSION="${REF#v}"; TAG="$REF"; TITLE="kkFileView ${VERSION}"; MK="false"
               echo ">>> 场景: 稳定版（tag=${REF}，版本=${VERSION}）" ;;
-          *)  echo "!!! 不支持的 tag 格式: ${REF}（应为 vx.y.z，如 v5.0.2）"; exit 1 ;;
+          *)  echo "!!! 不支持的 tag 格式: ${REF}（应为 vx.y.z，如 v4.4.0）"; exit 1 ;;
         esac
       else
-        VERSION="${KK_VERSION:-5.0.2}"
-        TAG="latest"
-        TITLE="kkFileView ${VERSION} (latest)"
+        VERSION="${KK_VERSION:-4.4.0}"
+        TAG="latest-4.x"
+        TITLE="kkFileView ${VERSION} (latest-4.x)"
         MK="true"
         echo ">>> 场景: 主线（分支=${REF}，版本=${VERSION}）"
       fi
@@ -153,7 +157,7 @@
       cat > RELEASE_NOTES.md <<EOF
       ## ${RELEASE_TITLE}
 
-      kkFileView ${RELEASE_VERSION}，在 CNB 上从源码编译（Maven + Temurin JDK 21，
+      kkFileView ${RELEASE_VERSION}，在 CNB 上从源码编译（Maven + Temurin JDK 8，
       源码 tag \`v${RELEASE_VERSION}\`），并打包为**自包含发行包**（内置 install.sh 与 systemd 服务文件）。
 
       ### 发行包
@@ -174,9 +178,9 @@
       # 打开 http://<host>:8012/
       \`\`\`
 
-      镜像 = Ubuntu 24.04 + OpenJDK 21 + LibreOffice（libreoffice-nogui）+ 中文字体
+      镜像 = Ubuntu 24.04 + OpenJDK 8 + LibreOffice（libreoffice-nogui）+ 中文字体
       （文泉驿 / Noto CJK）+ 时区 Asia/Shanghai + locale zh_CN.UTF-8，以非 root 用户运行，
-      内置 HEALTHCHECK（\`/actuator/health\`）。
+      内置 HEALTHCHECK（4.x 无 actuator，用首页 \`/\`）。
 
       > arm64 说明：上游 JavaCV 的 ffmpeg/opencv 原生库只有 x86_64 版本，
       > arm64 下视频转码类预览不可用（Office/PDF/图片/CAD 正常）。
@@ -184,7 +188,7 @@
 
       ### 运行前置条件（裸机安装）
 
-      * JDK 21 或更高版本
+      * JDK 8 或更高版本（4.x 产物是 Java 8 字节码）
       * LibreOffice：\`apt-get install -y libreoffice-nogui\`
         （kkFileView 的 OfficePluginManager 是 @PostConstruct，**找不到 office.home 会直接启动失败**）
 
@@ -354,21 +358,10 @@
       echo "Release     : ${RELEASE_TAG}"
       ls -lh "$PWD/dist" 2>/dev/null || true
 
-# ── 主线：main / master 分支 push（两架构并行） ───────────────────────────
-main:
-  push:
-    - name: mainline-amd64
-      <<: *build-env-amd64
-      env:
-        <<: *vars-amd64
-      stages: *stages
-    - name: mainline-arm64
-      <<: *build-env-arm64
-      env:
-        <<: *vars-arm64
-      stages: *stages
-
-master:
+# ── 主线：本分支的 push（两架构并行） ─────────────────────────────────────
+# 注意：CNB 从「被构建的那个 ref」读取 .cnb.yml，所以键要写成本分支名；
+# 用 glob "4.*" 可同时兼容将来的 4.4.x / 4.5.x 等分支。
+"4.*":
   push:
     - name: mainline-amd64
       <<: *build-env-amd64

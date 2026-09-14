@@ -1,6 +1,10 @@
 # 贡献指南
 
 本仓库是 **kkFileView 的源码构建 / 打包流水线**，不包含 kkFileView 源码本身
+
+本分支是 **4.x 线**（Java 8 / Spring Boot 2.4.2 / 无 actuator）；`main` 分支是 5.x 线
+（Java 21 / Spring Boot 3.5 / 有 actuator）。两条线的 JDK、探活方式、发布标签都不同
+（`latest-4.x` vs `latest`），改动请发到对应分支，不要把两条线混在一起。
 （构建时从上游仓库拉取）。因此这里不接受「修改 kkFileView 功能」的 PR ——
 那类改动请提到上游：https://github.com/kekingcn/kkFileView
 
@@ -27,10 +31,10 @@
    ./build.sh build            # 编译源码 → dist/
    ./build.sh package          # 打成自包含 tar.gz
    ./build.sh image            # 构建运行时镜像
-   ./build.sh smoke            # 起容器 + 探活 /actuator/health
+   ./build.sh smoke            # 起容器 + 探活（4.x 用首页 / ，脚本里也保留了 /actuator/health）
    ```
 
-   没有 Docker 时可用宿主机原生编译（需要 JDK 21 + Maven 3.9+）：
+   没有 Docker 时可用宿主机原生编译（需要 JDK 8 + Maven 3.9+）：
 
    ```bash
    ./build.sh native

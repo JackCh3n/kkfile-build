@@ -9,17 +9,17 @@
 #   ./build.sh all    [版本]                   # 编译 + 打包 + 构建镜像
 #   ./build.sh smoke  [镜像tag]                # 冒烟测试运行时镜像
 #   ./build.sh push   <镜像tag> [更多tag...]    # 推送镜像（需先 docker login）
-#   ./build.sh native [版本] [mirror]          # 宿主机原生编译（需 JDK 21 + Maven 3.9+）
+#   ./build.sh native [版本] [mirror]          # 宿主机原生编译（需 JDK 8 + Maven 3.9+）
 #   ./build.sh shell                           # 进入编译镜像的交互式 shell（排障用）
 #
 # 示例：
-#   ./build.sh all                       # 默认版本 5.0.2，产出 dist/ 与 kkfileview:5.0.2
-#   ./build.sh build 5.0.2 v5.0.2        # 指定版本与 git ref
-#   ./build.sh image 5.0.2 linux/amd64   # 只构建 amd64 镜像
-#   ./build.sh smoke kkfileview:5.0.2
+#   ./build.sh all                       # 默认版本 4.4.0，产出 dist/ 与 kkfileview:4.4.0
+#   ./build.sh build 4.4.0 v4.4.0        # 指定版本与 git ref
+#   ./build.sh image 4.4.0 linux/amd64   # 只构建 amd64 镜像
+#   ./build.sh smoke kkfileview:4.4.0
 #
 # 环境变量：
-#   KK_VERSION      默认版本（默认 5.0.2）
+#   KK_VERSION      默认版本（默认 4.4.0）
 #   KK_REPO_URLS    候选源码地址，空格分隔
 #   MAVEN_MIRROR    aliyun(默认)|central|huawei|tencent|none|<url>
 #   DOCKER_BUILDKIT 默认 1
@@ -32,7 +32,7 @@ cd "$SCRIPT_DIR"
 DIST_DIR="${SCRIPT_DIR}/dist"
 BUILDER_IMAGE="kkfileview-builder:local"
 RUNTIME_IMAGE="kkfileview"
-DEFAULT_VERSION="${KK_VERSION:-5.0.2}"
+DEFAULT_VERSION="${KK_VERSION:-4.4.0}"
 DEFAULT_REPO_URLS="https://github.com/kekingcn/kkFileView.git https://gitee.com/kekingcn/file-online-preview.git"
 
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
@@ -142,7 +142,7 @@ do_push() {
 
 do_native() {
   local ver="${1:-$DEFAULT_VERSION}" mirror="${2:-${MAVEN_MIRROR:-aliyun}}"
-  log "宿主机原生编译（需要 JDK 21 + Maven 3.9+）"
+  log "宿主机原生编译（需要 JDK 8 + Maven 3.9+）"
   bash "$SCRIPT_DIR/build-kkfileview.sh" \
     --version "$ver" \
     --maven-mirror "$mirror" \

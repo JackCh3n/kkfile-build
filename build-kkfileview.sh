@@ -3,7 +3,7 @@
 # build-kkfileview.sh —— 从源码编译 kkFileView
 #
 # 既可以在编译镜像（Dockerfile）里作为入口运行，也可以在宿主机上直接运行
-# （宿主机需自备 git / JDK 21 / Maven 3.9+）。
+# （宿主机需自备 git / JDK 8 / Maven 3.9+）。
 #
 # 产物（--output 指定，默认 $PWD/dist）：
 #   <out>/kkFileView-<版本>/                 解包后的发行目录（bin/ config/ log/ …）
@@ -16,14 +16,15 @@
 # 因为它需要仓库里的 assets/ 与 install.sh —— 而编译镜像里并没有这些文件。
 #
 # 用法示例：
-#   build-kkfileview.sh --version 5.0.2 --output /opt/dist
+#   build-kkfileview.sh --version 4.4.0 --output /opt/dist
 #   build-kkfileview.sh --ref master  --maven-mirror central
 #   build-kkfileview.sh --offline-src /opt/src/kkFileView --output ./dist
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_VERSION="1.0.0"
-DEFAULT_VERSION="5.0.2"
+# 4.x 线默认构建最新的 4.x（上游 tag v4.4.0）
+DEFAULT_VERSION="4.4.0"
 # 默认源码地址（按顺序尝试，任一可用即继续）：CNB/国内网络优先走 Gitee 镜像
 DEFAULT_REPO_URLS="https://github.com/kekingcn/kkFileView.git https://gitee.com/kekingcn/file-online-preview.git"
 
@@ -39,9 +40,9 @@ OPT_OFFLINE_SRC="${KK_OFFLINE_SRC:-}"
 OPT_VERIFY="yes"
 OPT_KEEP_SRC="no"
 OPT_ALLOW_MISMATCH="no"
-# 编译所需的最小 JDK 版本：main 分支的项目是 Java 21（maven.compiler.release=21），
-# 4.x 分支是 Java 8；由各分支的默认值 / --min-java 决定
-MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-21}"
+# 编译所需的最小 JDK 版本：4.x 线的项目是 Java 8（maven.compiler.source/target=1.8），
+# 必须用 JDK 8 编译；main 分支（5.x）则是 21
+MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-8}"
 
 # ---------- 运行期状态 ----------
 SRC_DIR=""
@@ -65,8 +66,8 @@ usage() {
   build-kkfileview.sh [选项]
 
 选项：
-  --version VER        kkFileView 版本，如 5.0.2；也可传 main/master 等分支名
-                       （默认 5.0.2，可用环境变量 KK_VERSION 覆盖）
+  --version VER        kkFileView 版本，如 4.4.0；也可传 main/master 等分支名
+                       （默认 4.4.0，可用环境变量 KK_VERSION 覆盖）
   --ref REF            git ref（tag / 分支 / commit），显式指定时优先级高于 --version
   --repo-url URLS      候选源码地址，空格或逗号分隔，按顺序尝试
                        （默认 github + gitee 两个官方镜像）
@@ -76,7 +77,7 @@ usage() {
   --jobs N             Maven 并行线程数（-T N，默认 1 表示不启用）
   --offline-src DIR    直接使用已有的源码目录，跳过克隆
   --no-verify          跳过编译后的静态校验（不推荐）
-  --min-java N         编译所需最小 JDK 版本（默认 21；4.x 源码需要 8）
+  --min-java N         编译所需最小 JDK 版本（默认 8；4.x 源码 maven.compiler=1.8）
   --allow-mismatch     允许 --version 与 pom.xml 中的版本号不一致（默认报错）
   --keep-src           保留克隆出来的源码目录
   -h, --help           显示本帮助
@@ -334,7 +335,7 @@ Maven 镜像      : ${OPT_MAVEN_MIRROR}
 Maven 命令      : mvn -B -Dmaven.test.skip=true clean package（--offline-src 时为已有源码目录）
 发行目录        : $(basename "$pkg_dir")
 应用端口        : 8012（可用环境变量 KK_SERVER_PORT 覆盖）
-健康检查        : http://127.0.0.1:8012/actuator/health
+健康检查        : http://127.0.0.1:8012/（首页返回 2xx 即就绪；4.x 无 actuator）
 上下文路径      : /（可用环境变量 KK_CONTEXT_PATH 覆盖）
 fat jar SHA256  : ${sha}
 说明            : kkFileView 启动时强依赖 LibreOffice（office.home），

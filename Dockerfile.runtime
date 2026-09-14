@@ -1,18 +1,20 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# kkfile-build · 运行时镜像（kkFileView 应用镜像）
+# kkfile-build · 运行时镜像（kkFileView 应用镜像）—— 4.x 线（Java 8）
 #
 # 构建上下文 = 仓库根目录，需要先跑出 dist/kkfileview-<版本>.tar.gz：
 #   ./build.sh build                       # 编译并打包
-#   docker build -f Dockerfile.runtime --build-arg KK_VERSION=5.0.2 -t kkfileview:5.0.2 .
+#   docker build -f Dockerfile.runtime --build-arg KK_VERSION=4.4.0 -t kkfileview:4.4.0 .
 #
 # 多架构（在 x86_64 上构建 arm64 需 buildx + QEMU）：
 #   docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.runtime \
-#     --build-arg KK_VERSION=5.0.2 -t <registry>/<repo>:<tag> --push .
+#     --build-arg KK_VERSION=4.4.0 -t <registry>/<repo>:<tag> --push .
 #
 # 关键设计
 # ---------
-# 1) 基础镜像 Ubuntu 24.04：官方发行版、amd64/arm64 都有原生 manifest。
+# 1) 基础镜像 Ubuntu 24.04 + **openjdk-8-jre**：4.x 的 maven.compiler.source/target
+#    是 1.8，字节码只能用 JRE 8 跑（Ubuntu 24.04 的 openjdk-8-jre 在 amd64/arm64
+#    都有发布，因此两个架构都能构建）。
 # 2) 必须装 LibreOffice（libreoffice-nogui）：kkFileView 的 OfficePluginManager 是
 #    @PostConstruct，找不到 office.home 会抛异常使进程直接退出；装完后
 #    /usr/lib/libreoffice/program/soffice.bin 正好命中 LocalOfficeUtils 的默认搜索路径，
@@ -21,6 +23,8 @@
 #    避免中文文档预览乱码；如需额外字体，把字体文件放进 assets/fonts/ 再构建即可。
 # 4) 以非 root（uid 10001）运行；应用需要可写的 <home>/file、<home>/log 与 /data，
 #    镜像内已建好并改好属主。
+# 5) 4.x 没有引入 spring-boot-starter-actuator，所以健康检查用首页 /（HTTP 2xx），
+#    而不是 /actuator/health。
 # =============================================================================
 
 ARG RUNTIME_BASE=ubuntu:24.04
@@ -56,7 +60,7 @@ RUN set -eux; \
     fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        openjdk-21-jre \
+        openjdk-8-jre \
         libreoffice-nogui \
         fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk \
         fontconfig xfonts-utils \
@@ -113,9 +117,9 @@ USER 10001:10001
 WORKDIR /opt/kkFileView-${KK_VERSION}/bin
 EXPOSE 8012
 
-# 启动探活：/actuator/health 为 UP 说明 Spring 上下文就绪，
-# 同时也意味着 LibreOffice 已被正确识别（否则进程在启动阶段就退出了）。
+# 启动探活：4.x 没有 actuator，用首页 / 返回 2xx 作为就绪判据。
+# 服务能起来本身就说明 LibreOffice 已被正确识别（否则进程在启动阶段就退出了）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${KK_SERVER_PORT}/actuator/health" || exit 1
+  CMD curl -fsS "http://127.0.0.1:${KK_SERVER_PORT}/" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/kkfileview"]

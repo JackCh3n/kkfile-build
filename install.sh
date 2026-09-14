@@ -3,21 +3,21 @@
 # install.sh —— kkFileView 离线安装 / 原地升级脚本（发行包自包含，无需联网）
 #
 # 典型用法：
-#   tar -xzf kkfileview-5.0.2.tar.gz
-#   cd kkFileView-5.0.2
+#   tar -xzf kkfileview-4.4.0.tar.gz
+#   cd kkFileView-4.4.0
 #   sudo ./install.sh --start
 #
 # 也可以直接从 tar.gz 安装：
-#   sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
+#   sudo ./install.sh --from /path/to/kkfileview-4.4.0.tar.gz --start
 #
 # 脚本会做这些事：
-#   1) 检查 Java（必须 21+，Spring Boot 3.5 + release=21 字节码）与 LibreOffice
+#   1) 检查 Java（4.x 必须 8+，源码 maven.compiler.source/target=1.8）与 LibreOffice
 #   2) 创建运行用户、安装目录、数据目录
 #   3) 同步 bin/ config/ 到安装目录（升级时保留并备份旧配置、清理旧 jar）
 #   4) 写 /etc/kkfileview/kkfileview.env 与 systemd 服务（可选）
 #
-# 前置依赖（脚本不会替你联网安装）：JDK 21+、LibreOffice。
-#   Debian/Ubuntu : apt-get install -y openjdk-21-jre libreoffice-nogui fonts-wqy-microhei fonts-wqy-zenhei
+# 前置依赖（脚本不会替你联网安装）：JDK 8+、LibreOffice。
+#   Debian/Ubuntu : apt-get install -y openjdk-8-jre libreoffice-nogui fonts-wqy-microhei fonts-wqy-zenhei
 #   RHEL/CentOS   : 可用发行包内的 bin/install.sh 下载 LibreOffice（需联网）
 # =============================================================================
 set -euo pipefail
@@ -46,8 +46,8 @@ KEEP_CONFIG="yes"
 JAVA_HOME_ARG=""
 PKG_DIR_ARG=""
 FROM_TARBALL=""
-# 运行所需最小 Java 版本：main 分支的产物是 Java 21 字节码，4.x 分支是 Java 8
-MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-21}"
+# 运行所需最小 Java 版本：4.x 线产物是 Java 8 字节码（main 分支的 5.x 是 21）
+MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-8}"
 
 # ---------- 运行期状态 ----------
 PKG_DIR=""
@@ -76,8 +76,8 @@ kkFileView 离线安装 / 升级
       --data-dir DIR   运行数据目录         (默认 /var/lib/kkfileview)
       --user NAME      运行用户             (默认 kkfileview)
       --port N         服务端口             (默认 8012)
-      --java-home DIR  指定 JAVA_HOME（须为 JDK/JRE 21+）
-      --min-java N     运行所需最小 Java 版本（默认 21；4.x 产物需要 8）
+      --java-home DIR  指定 JAVA_HOME（须为 JDK/JRE 8+）
+      --min-java N     运行所需最小 Java 版本（默认 8）
 
 来源与行为:
       --pkg DIR        指定解包后的发行目录（默认取脚本所在目录）
@@ -190,7 +190,7 @@ find_java() {
 check_java() {
   log "检查 Java..."
   if ! JAVA_BIN="$(find_java)"; then
-    die "未找到 java。请安装 JDK 21+（apt-get install -y openjdk-21-jre），或用 --java-home 指定"
+    die "未找到 java。请安装 JDK 8+（apt-get install -y openjdk-8-jre），或用 --java-home 指定"
   fi
   local major
   major="$(java_major_version "$JAVA_BIN")"
@@ -410,7 +410,7 @@ print_summary() {
   printf '  环境变量   : %s\n' "$ENV_FILE"
   printf '  数据目录   : %s\n' "$DATA_DIR"
   printf '  访问地址   : http://<服务器IP>:%s%s\n' "$PORT" "$ctx"
-  printf '  健康检查   : http://127.0.0.1:%s%sactuator/health\n' "$PORT" "$ctx"
+  printf '  健康检查   : http://127.0.0.1:%s%s（首页，HTTP 2xx 即就绪）\n' "$PORT" "$ctx"
   printf '  启动服务   : systemctl start %s\n' "$UNIT_NAME"
   printf '  查看日志   : journalctl -u %s -f\n' "$UNIT_NAME"
   printf '  手工启动   : %s/bin/kkfileview-run.sh\n' "$PREFIX"

@@ -6,13 +6,13 @@
 #   ./build.sh all && docker compose up -d
 #
 #   # 用 CI 发布的镜像
-#   KK_IMAGE=ghcr.io/jackch3n/kkfile-build:latest docker compose up -d
-#   KK_IMAGE=docker.cnb.cool/jackch3n/kkfile-build:latest docker compose up -d
+#   KK_IMAGE=ghcr.io/jackch3n/kkfile-build:latest-4.x docker compose up -d
+#   KK_IMAGE=docker.cnb.cool/jackch3n/kkfile-build:latest-4.x docker compose up -d
 #
 # 说明：
 #   * 默认镜像名是本项目 `./build.sh all` 构建出的本地镜像 kkfileview:latest；
 #     CI 发布的镜像地址如上（镜像名与本仓库同名），需通过 KK_IMAGE 指定
-#   * 镜像内已内置 LibreOffice、JDK 21 与中文字体，无需额外安装宿主依赖；
+#   * 镜像内已内置 LibreOffice、JDK 8 与中文字体，无需额外安装宿主依赖；
 #   * /data 用于存放转换后的文件与本地预览文件，建议挂载持久化卷；
 #   * 生产环境请按需在 ./config/application.properties 中配置
 #     base.url / trust.host / 水印等参数，并通过只读挂载覆盖容器内配置。
@@ -45,7 +45,8 @@ services:
       # 自定义配置（与上面的 KKFILEVIEW_CONFIG_FILE 配合使用）
       # - ./config/application.properties:/etc/kkfileview/application.properties:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8012/actuator/health || exit 1"]
+      # 4.x 没有 actuator，用首页 / 判就绪
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8012/ || exit 1"]
       interval: 30s
       timeout: 5s
       start_period: 120s

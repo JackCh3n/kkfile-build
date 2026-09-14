@@ -1,28 +1,29 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# kkfile-build · 编译镜像（builder）
+# kkfile-build · 编译镜像（builder）—— 4.x 线（Java 8）
 #
-# 作用：提供一个「Maven 3.9 + Temurin JDK 21 + git」的 Linux 环境，用于从源码
-#       编译 kkFileView（Spring Boot 3.5 / Java 21），产出自包含发行目录。
+# 作用：提供一个「Maven 3.9 + Temurin JDK 8 + git」的 Linux 环境，用于从源码
+#       编译 kkFileView 4.x（Spring Boot 2.4.2 / Java 8），产出自包含发行目录。
 #
 # 用法：
 #   docker build -t kkfileview-builder:local -f Dockerfile .
 #   docker run --rm -v "$PWD/dist:/opt/dist" -v "$HOME/.m2:/root/.m2" \
-#     kkfileview-builder:local --version 5.0.2 --output /opt/dist
+#     kkfileview-builder:local --version 4.4.0 --output /opt/dist
 #
 # 关键设计
 # ---------
-# 1) 基础镜像默认 maven:3.9-eclipse-temurin-21（Ubuntu 24.04 + Temurin JDK 21），
-#    可用 --build-arg BUILDER_IMAGE=<image> 覆盖（便于固定到具体小版本）。
+# 1) 基础镜像默认 maven:3.9-eclipse-temurin-8（Ubuntu + Temurin JDK 8），
+#    可用 --build-arg BUILDER_IMAGE=<image> 覆盖。
+#    4.x 源码的 maven.compiler.source/target 是 1.8，所以编译只能用 JDK 8。
 # 2) Maven 镜像源不在构建期固化：build-kkfileview.sh 在「运行期」生成 settings.xml，
 #    通过 --maven-mirror aliyun|central|huawei|tencent|none|<url> 切换，换源无需重建镜像。
 # 3) 本镜像故意不安装 LibreOffice。kkFileView 的 OfficePluginManager 是
 #    @PostConstruct，找不到 office.home 会直接抛异常导致进程退出；因此冒烟测试
-#    （起进程 + 探活 /actuator/health）必须放在装了 LibreOffice 的运行时镜像里做，
+#    （起进程 + 探活）必须放在装了 LibreOffice 的运行时镜像里做，
 #    见 Dockerfile.runtime 与 smoke-test.sh。
 # =============================================================================
 
-ARG BUILDER_IMAGE=maven:3.9-eclipse-temurin-21
+ARG BUILDER_IMAGE=maven:3.9-eclipse-temurin-8
 FROM ${BUILDER_IMAGE}
 
 # APT 镜像（Ubuntu/Debian 两种 sources 格式都做了兼容），留空表示用基础镜像默认源。

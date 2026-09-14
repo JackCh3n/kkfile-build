@@ -3,16 +3,23 @@
 #
 # 做什么
 # ------
-#   1) 在 Docker 里从源码编译 kkFileView（Maven + JDK 21），产出自包含发行包
-#   2) 构建运行时镜像（Ubuntu 24.04 + JRE21 + LibreOffice + 中文字体）并推送到 GHCR
+#   1) 在 Docker 里从源码编译 kkFileView 4.x（Maven + JDK 8），产出自包含发行包
+#   2) 构建运行时镜像（Ubuntu 24.04 + JRE8 + LibreOffice + 中文字体）并推送到 GHCR
 #   3) 在 GitHub Releases 上发布发行包（tar.gz / jar / SHA256SUMS）+ 镜像说明
 #   4) 可选：把镜像同步到 CNB 制品库（配置 secrets.CNB_TOKEN 与 vars.CNB_REPO_SLUG 后生效）
 #
+# 分支说明
+# --------
+#   main 分支 = 5.x 线（Java 21 / Spring Boot 3.5 / 有 actuator）
+#   本分支 4.x = 4.x 线（Java 8 / Spring Boot 2.4.2 / 无 actuator）
+#   两条线的构建体系差异较大（JDK、探活方式、发布标签），因此分开维护，
+#   发布标签也分开（`latest` vs `latest-4.x`），互不覆盖。
+#
 # 场景与版本语义
 # --------------
-#   * push 到 main/master -> 主线：构建 KK_VERSION 指定的稳定版本（默认 5.0.2，
-#     从 tag v5.0.2 取源码，保证可复现），滚动发布到 Release tag `latest`，
-#     镜像打 `latest` 与 `<版本>` 两个 tag
+#   * push 到本分支 -> 主线：构建 KK_VERSION 指定的稳定版本（默认 4.4.0，
+#     从 tag v4.4.0 取源码，保证可复现），滚动发布到 Release tag `latest-4.x`，
+#     镜像打 `latest-4.x` 与 `<版本>` 两个 tag
 #   * push tag v*         -> 稳定版：从 tag 名解析版本，发布到同名 Release（固化），
 #     镜像打 `<版本>` 与 `v<版本>` 两个 tag
 #   * workflow_dispatch   -> 手动：可指定版本 / git ref / 平台 / 是否推镜像
@@ -32,11 +39,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "kkFileView 版本号（同时决定源码 tag v<版本>）"
-        required: false
-        default: "5.0.2"
+        description: "kkFileView 4.x 版本号（同时决定源码 tag v<版本>）"
+        type: choice
+        options:
+          - "4.4.0"
+          - "4.3.0"
+          - "4.2.1"
+          - "4.2.0"
+          - "4.1.0"
+        default: "4.4.0"
       ref:
-        description: "git ref（留空 = v<版本>；可填 master / v5.0.1 / commit）"
+        description: "git ref（留空 = v<版本>；可填 4.x / v4.3.0 / commit）"
         required: false
         default: ""
       platforms:
@@ -52,7 +65,7 @@ on:
         options: ["yes", "no"]
         default: "yes"
   push:
-    branches: [main, master]
+    branches: [4.x, "4.*"]
     tags: ["v*"]
 
 # 发布 Release 与推送 GHCR 都需要写权限
@@ -67,7 +80,7 @@ concurrency:
 
 env:
   # 主线默认构建的版本；上游发新版本时改这里即可
-  KK_VERSION: "5.0.2"
+  KK_VERSION: "4.4.0"
   # 源码地址：按顺序尝试（GitHub 优先，Gitee 作兜底）
   KK_REPO_URLS: "https://github.com/kekingcn/kkFileView.git https://gitee.com/kekingcn/file-online-preview.git"
   # GitHub runner 访问 Maven Central 更快，这里不用国内镜像
@@ -84,6 +97,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       title: ${{ steps.resolve.outputs.title }}
       make_latest: ${{ steps.resolve.outputs.make_latest }}
+      latest_tag: ${{ steps.resolve.outputs.latest_tag }}
       platforms: ${{ steps.resolve.outputs.platforms }}
       push_image: ${{ steps.resolve.outputs.push_image }}
     steps:
@@ -92,6 +106,7 @@ jobs:
         run: |
           set -e
           SCENE=""; VERSION=""; REF=""; RELEASE_TAG=""; TITLE=""; MAKE_LATEST="false"
+          LATEST_TAG="latest-4.x"
           PLATFORMS="linux/amd64,linux/arm64"
           PUSH_IMAGE="yes"
 
@@ -107,7 +122,7 @@ jobs:
             REF="${{ github.ref_name }}"
             case "$REF" in
               v*) VERSION="${REF#v}" ;;
-              *) echo "::error::tag 必须以 v 开头（例如 v5.0.2），当前为 $REF"; exit 1 ;;
+              *) echo "::error::tag 必须以 v 开头（例如 v4.4.0），当前为 $REF"; exit 1 ;;
             esac
           else
             SCENE="mainline"
@@ -121,7 +136,7 @@ jobs:
             *)  RELEASE_TAG="v$VERSION" ;;
           esac
           case "$SCENE" in
-            mainline) RELEASE_TAG="latest"; TITLE="kkFileView $VERSION (latest)" ;;
+            mainline) RELEASE_TAG="$LATEST_TAG"; TITLE="kkFileView $VERSION ($LATEST_TAG)" ;;
             tag)      TITLE="kkFileView $VERSION" ;;
             *)        TITLE="kkFileView $VERSION" ;;
           esac
@@ -134,6 +149,7 @@ jobs:
             echo "release_tag=$RELEASE_TAG"
             echo "title=$TITLE"
             echo "make_latest=$MAKE_LATEST"
+            echo "latest_tag=$LATEST_TAG"
             echo "platforms=$PLATFORMS"
             echo "push_image=$PUSH_IMAGE"
           } >> "$GITHUB_OUTPUT"
@@ -244,7 +260,7 @@ jobs:
             echo "${IMG}:${V}"
             echo "${IMG}:v${V}"
             if [ "${{ needs.prepare.outputs.scene }}" = "mainline" ]; then
-              echo "${IMG}:latest"
+              echo "${IMG}:${{ needs.prepare.outputs.latest_tag }}"
             fi
             echo "__TAGS__"
           } >> "$GITHUB_OUTPUT"
@@ -384,7 +400,7 @@ jobs:
           cat > notes.md <<EOF
           ## ${TITLE}
 
-          kkFileView ${VERSION}，在 Docker 中从源码编译（Maven 3.9 + Temurin JDK 21，
+          kkFileView ${VERSION}，在 Docker 中从源码编译（Maven 3.9 + Temurin JDK 8，
           源码 tag \`v${VERSION}\`），并打包为**自包含发行包**（内置 install.sh 与 systemd 服务文件）。
 
           ### 发行包
@@ -404,13 +420,13 @@ jobs:
           # 打开 http://<host>:8012/
           \`\`\`
 
-          镜像 = Ubuntu 24.04 + OpenJDK 21 + LibreOffice（libreoffice-nogui）+ 中文字体
+          镜像 = Ubuntu 24.04 + OpenJDK 8 + LibreOffice（libreoffice-nogui）+ 中文字体
           （文泉驿 / Noto CJK）+ 时区 Asia/Shanghai + locale zh_CN.UTF-8，以非 root 用户运行，
-          内置 HEALTHCHECK（\`/actuator/health\`）。
+          内置 HEALTHCHECK（4.x 无 actuator，用首页 \`/\`）。
 
           ### 运行前置条件（裸机安装）
 
-          * JDK 21 或更高版本
+          * JDK 8 或更高版本（4.x 产物是 Java 8 字节码）
           * LibreOffice：\`apt-get install -y libreoffice-nogui\`
             （kkFileView 的 OfficePluginManager 是 @PostConstruct，**找不到 office.home 会直接启动失败**）
 
