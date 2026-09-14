@@ -124,14 +124,29 @@ fi
 [ -s "$TARBALL" ] || die "打包失败: $TARBALL"
 
 # ---------- 校验和 ----------
+# 注意：必须在「子 shell」里 cd。之前写成 `{ ...; } > "$SHA_FILE"`，
+# cd 会改变脚本自身的工作目录——当 --dist 传的是相对路径（CI 就是 `--dist dist`）时，
+# 后续所有相对路径都会变成 dist/dist/...，导致脚本末尾误报失败。
 SHA_FILE="${DIST_DIR}/SHA256SUMS"
-{
-  cd "$DIST_DIR"
-  [ -f "$(basename "$TARBALL")" ] && sha256sum "$(basename "$TARBALL")"
-  [ -f "kkFileView-${VERSION}.jar" ] && sha256sum "kkFileView-${VERSION}.jar"
-} > "$SHA_FILE" || warn "生成 SHA256SUMS 失败"
+(
+  cd "$DIST_DIR" || exit 1
+  T="$(basename "$TARBALL")"
+  J="kkFileView-${VERSION}.jar"
+  if [ -f "$T" ] && [ -f "$J" ]; then
+    sha256sum "$T" "$J"
+  elif [ -f "$T" ]; then
+    sha256sum "$T"
+  fi
+) > "$SHA_FILE" || warn "生成 SHA256SUMS 失败"
 
+# 结尾不用 `[ ... ] && ...` 形式：作为最后一条命令，条件不成立会让脚本以非 0 退出
 log "打包完成:"
 ls -lh "$TARBALL" 2>/dev/null || true
 ls -lh "$DIST_DIR/kkFileView-${VERSION}.jar" 2>/dev/null || true
-[ -s "$SHA_FILE" ] && { log "校验和:"; cat "$SHA_FILE"; }
+if [ -s "$SHA_FILE" ]; then
+  log "校验和:"
+  cat "$SHA_FILE"
+else
+  warn "SHA256SUMS 为空或缺失"
+fi
+exit 0
