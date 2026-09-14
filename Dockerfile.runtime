@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# kkfile-build · 运行时镜像（kkFileView 应用镜像）
+#
+# 构建上下文 = 仓库根目录，需要先跑出 dist/kkfileview-<版本>.tar.gz：
+#   ./build.sh build                       # 编译并打包
+#   docker build -f Dockerfile.runtime --build-arg KK_VERSION=5.0.2 -t kkfileview:5.0.2 .
+#
+# 多架构（在 x86_64 上构建 arm64 需 buildx + QEMU）：
+#   docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.runtime \
+#     --build-arg KK_VERSION=5.0.2 -t <registry>/<repo>:<tag> --push .
+#
+# 关键设计
+# ---------
+# 1) 基础镜像 Ubuntu 24.04：官方发行版、amd64/arm64 都有原生 manifest。
+# 2) 必须装 LibreOffice（libreoffice-nogui）：kkFileView 的 OfficePluginManager 是
+#    @PostConstruct，找不到 office.home 会抛异常使进程直接退出；装完后
+#    /usr/lib/libreoffice/program/soffice.bin 正好命中 LocalOfficeUtils 的默认搜索路径，
+#    因此 office.home=default 即可，无需额外配置。
+# 3) 内置中文字体（文泉驿 + Noto CJK）与时区/locale（Asia/Shanghai、zh_CN.UTF-8），
+#    避免中文文档预览乱码；如需额外字体，把字体文件放进 assets/fonts/ 再构建即可。
+# 4) 以非 root（uid 10001）运行；应用需要可写的 <home>/file、<home>/log 与 /data，
+#    镜像内已建好并改好属主。
+# =============================================================================
+
+ARG RUNTIME_BASE=ubuntu:24.04
+FROM ${RUNTIME_BASE}
+
+# 发行包版本，必须显式传入（tar 包名里带版本号）
+ARG KK_VERSION
+# APT 镜像（Ubuntu 24.04 的 deb822 格式），留空表示用官方源
+ARG APT_MIRROR=https://mirrors.aliyun.com
+# 是否安装微软核心字体：ttf-mscorefonts-installer 构建期需访问 sourceforge，
+# 国内网络易失败，故默认关闭；对 Word 排版保真度要求高时置为 yes。
+ARG INSTALL_MS_FONTS=no
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    test -n "${KK_VERSION}" || { echo "!! 必须通过 --build-arg KK_VERSION=<版本> 指定版本"; exit 1; }; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      sed -i -E "s@https?://(archive|security|ports)\.ubuntu\.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
+      grep -q 'universe' /etc/apt/sources.list.d/ubuntu.sources || \
+        sed -i -E 's@^Components:.*@Components: main restricted universe multiverse@' /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        openjdk-21-jre \
+        libreoffice-nogui \
+        fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk \
+        fontconfig xfonts-utils \
+        locales tzdata \
+        curl ca-certificates; \
+    if [ "${INSTALL_MS_FONTS}" = "yes" ]; then \
+      apt-get install -y --no-install-recommends debconf; \
+      echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections; \
+      apt-get install -y --no-install-recommends ttf-mscorefonts-installer; \
+    fi; \
+    echo 'Asia/Shanghai' > /etc/timezone; \
+    ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime; \
+    sed -i -E 's@^# *zh_CN\.UTF-8 UTF-8@zh_CN.UTF-8 UTF-8@' /etc/locale.gen; \
+    locale-gen; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# 额外中文字体（assets/fonts/ 里放 .ttf/.ttc/.otf 即可随镜像分发）
+COPY assets/fonts/ /usr/share/fonts/kkfileview-extra/
+
+# 已编译好的发行包（由 ./build.sh build + package-dist.sh 产出）
+COPY dist/kkfileview-${KK_VERSION}.tar.gz /tmp/kkfileview.tar.gz
+
+ENV LANG=zh_CN.UTF-8 \
+    LC_ALL=zh_CN.UTF-8 \
+    TZ=Asia/Shanghai \
+    KKFILEVIEW_HOME=/opt/kkFileView-${KK_VERSION} \
+    KKFILEVIEW_BIN_FOLDER=/opt/kkFileView-${KK_VERSION}/bin \
+    KKFILEVIEW_CONFIG_FILE=/opt/kkFileView-${KK_VERSION}/config/application.properties \
+    KK_SERVER_PORT=8012 \
+    KK_CONTEXT_PATH=/ \
+    KK_OFFICE_HOME=default \
+    KK_FILE_DIR=/data/file \
+    KK_LOCAL_PREVIEW_DIR=/data/preview \
+    JAVA_OPTS="-Xms512m -Xmx2g"
+
+RUN set -eux; \
+    tar -xzf /tmp/kkfileview.tar.gz -C /opt; \
+    rm -f /tmp/kkfileview.tar.gz; \
+    test -d "${KKFILEVIEW_HOME}" || { echo "!! 发行包内缺少 ${KKFILEVIEW_HOME}"; ls -la /opt; exit 1; }; \
+    test -f "${KKFILEVIEW_HOME}/config/application.properties" || { echo "!! 发行包缺少 config/application.properties"; exit 1; }; \
+    mkdir -p "${KKFILEVIEW_HOME}/log" "${KKFILEVIEW_HOME}/file" /data/file /data/preview; \
+    chmod 0755 "${KKFILEVIEW_HOME}"/bin/*.sh || true; \
+    test -f "${KKFILEVIEW_HOME}/bin/kkfileview-run.sh" || { echo "!! 发行包缺少 bin/kkfileview-run.sh"; exit 1; }; \
+    fc-cache -f >/dev/null; \
+    groupadd -g 10001 kkfileview; \
+    useradd -u 10001 -g 10001 -M -d "${KKFILEVIEW_HOME}" -s /usr/sbin/nologin kkfileview; \
+    chown -R 10001:10001 "${KKFILEVIEW_HOME}" /data; \
+    ln -sf "${KKFILEVIEW_HOME}/bin/kkfileview-run.sh" /usr/local/bin/kkfileview
+
+ENV HOME=/opt/kkFileView-${KK_VERSION}
+
+USER 10001:10001
+WORKDIR /opt/kkFileView-${KK_VERSION}/bin
+EXPOSE 8012
+
+# 启动探活：/actuator/health 为 UP 说明 Spring 上下文就绪，
+# 同时也意味着 LibreOffice 已被正确识别（否则进程在启动阶段就退出了）。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:${KK_SERVER_PORT}/actuator/health" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/kkfileview"]

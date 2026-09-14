@@ -1,0 +1,28 @@
+[Unit]
+Description=kkFileView 文档在线预览服务
+Documentation=https://kkview.cn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+# 前置 "-" 表示该文件不存在也不报错
+EnvironmentFile=-__ENV_FILE__
+WorkingDirectory=__PREFIX__/bin
+ExecStart=__PREFIX__/bin/kkfileview-run.sh
+Restart=on-failure
+RestartSec=5
+# 优雅退出（SIGTERM=143）视为成功，避免 systemctl stop 后标记为 failed
+SuccessExitStatus=143
+KillMode=mixed
+TimeoutStopSec=90
+LimitNOFILE=65535
+
+# LibreOffice 需要一个可写的 HOME（默认取 /etc/passwd 里该用户的家目录）。
+# 若遇到 Office 转换失败，可打开下面这行把 HOME 指到安装目录：
+# Environment=HOME=__PREFIX__
+
+[Install]
+WantedBy=multi-user.target

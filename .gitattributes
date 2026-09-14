@@ -1,0 +1,19 @@
+# 统一换行符为 LF
+# 说明：本项目脚本主要在 Linux 容器内执行，若被检出为 CRLF，
+# 容器内会报 "/bin/bash^M: bad interpreter" 之类的错误，因此强制 LF。
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+*.dockerignore text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.service text eol=lf
+*.conf text eol=lf
+*.example text eol=lf
+*.env text eol=lf
+*.json text eol=lf
+# Windows 批处理必须保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

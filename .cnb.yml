@@ -1,0 +1,303 @@
+# =============================================================================
+# kkfile-build · CNB（cnb.cool）云原生构建流水线
+#
+# 做什么
+# ------
+#   1) 在 CNB 上从源码编译 kkFileView 并打出自包含发行包
+#   2) 发布到 CNB Release（附件：tar.gz / jar / SHA256SUMS / BUILD-INFO.txt）
+#   3) 构建运行时镜像并推送到 CNB 制品库
+#      本仓库的镜像地址即 docker.cnb.cool/jackch3n/kkfile-build
+#      （由 ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE} 自动拼出，无需改）
+#
+# 与 GitHub Actions 的分工
+# ------------------------
+#   * 发行包（tar.gz/jar）：两端完全一致，互为镜像，方便国内/海外分别下载
+#   * 容器镜像：GitHub 端用 buildx + QEMU 发布 **多架构** 镜像到 GHCR；
+#     CNB 端发布 **本机架构（amd64）** 镜像到 docker.cnb.cool —— 原因是在
+#     dind（services: docker）里跑 docker-container 驱动的多架构 buildx 依赖
+#     privileged/binfmt，稳定性无法保证。需要 arm64 镜像时：
+#       - 用 GitHub Actions 的镜像产物，或
+#       - 在 arm64 机器上执行 ./build.sh all
+#   * 如果所在 CNB 环境不支持 dind（push-image 阶段报错找不到 docker/无法连接
+#     守护进程），把最后的 push-image 阶段整段删掉即可：发行包与 Release 照常发布，
+#     镜像交给 GitHub Actions（或本机 ./build.sh all）产出。
+#
+# 场景与版本语义（与 GitHub Actions 保持一致）
+# --------------------------------------------
+#   * main / master 分支 push -> 主线：构建 KK_VERSION 指定的版本（默认 5.0.2，
+#     源码取 tag v5.0.2，保证可复现），滚动发布到 Release tag `latest`
+#   * git tag v*             -> 稳定版：从 tag 解析版本，发布到同名 Release（固化）
+#
+# ⚠️ tag_push 只匹配 glob "v*"，**不要**用兜底符 `$`：
+#    滚动发布会创建 latest 这个 git tag，用 `$` 会把 latest 也匹配进来，
+#    触发一次多余的完整构建（甚至形成循环）。
+#
+# 注意：CNB 的 `runner` / `docker` / `services` 只能写在 **流水线级别**，
+#       stage/job 级别只支持 `image`，所以这里用 YAML 锚点复用。
+# =============================================================================
+
+# ── 构建环境（编译镜像 + Docker-in-Docker） ────────────────────────────────
+# docker.build 让所有 stage 跑在我们自己的编译镜像里（含 Maven 3.9 + JDK 21 + git），
+# 由 CNB 负责构建与缓存；services.docker 注入 dind 与 docker CLI，供推送镜像使用。
+# 注意：buildArgs 必须是 docker.build 的子节点（写成 docker 的子节点会被静默忽略）。
+.build-env: &build-env
+  runner:
+    tags: cnb:arch:amd64
+    cpus: 8
+  services:
+    - docker
+  docker:
+    build:
+      dockerfile: Dockerfile
+      by:
+        - Dockerfile
+        - build-kkfileview.sh
+      buildArgs:
+        APT_MIRROR: https://mirrors.aliyun.com
+
+# ── 默认版本（主线构建用；上游发新版时改这里） ─────────────────────────────
+.vars: &vars
+  KK_VERSION: "5.0.2"
+  MAVEN_MIRROR: aliyun
+  # CNB runner 在国内，Gitee 镜像优先、GitHub 兜底
+  KK_REPO_URLS: "https://gitee.com/kekingcn/file-online-preview.git https://github.com/kekingcn/kkFileView.git"
+
+# ── 统一阶段（主线 / 稳定版共用） ──────────────────────────────────────────
+.stages: &stages
+  # 判定场景并解析版本，通过 set-output + exports 注入后续 stage
+  - name: resolve-scene
+    script: |
+      set -e
+      REF="${CNB_BRANCH:-}"
+      if [ "${CNB_IS_TAG:-false}" = "true" ]; then
+        case "$REF" in
+          v*) VERSION="${REF#v}"; TAG="$REF"; TITLE="kkFileView ${VERSION}"; MK="false"
+              echo ">>> 场景: 稳定版（tag=${REF}，版本=${VERSION}）" ;;
+          *)  echo "!!! 不支持的 tag 格式: ${REF}（应为 vx.y.z，如 v5.0.2）"; exit 1 ;;
+        esac
+      else
+        VERSION="${KK_VERSION:-5.0.2}"
+        TAG="latest"
+        TITLE="kkFileView ${VERSION} (latest)"
+        MK="true"
+        echo ">>> 场景: 主线（分支=${REF}，版本=${VERSION}）"
+      fi
+      # 源码 ref 固定为 v<版本>：主线也取 tag，保证「同一个版本号永远编译同一份源码」
+      echo "##[set-output TAG=${TAG}]"
+      echo "##[set-output VERSION=${VERSION}]"
+      echo "##[set-output REF=v${VERSION}]"
+      echo "##[set-output TITLE=${TITLE}]"
+      echo "##[set-output MK=${MK}]"
+    exports:
+      TAG: RELEASE_TAG
+      VERSION: RELEASE_VERSION
+      REF: RELEASE_REF
+      TITLE: RELEASE_TITLE
+      MK: RELEASE_MAKE_LATEST
+
+  # 从源码编译
+  - name: build-kkfileview
+    script: |
+      set -e
+      echo ">>> 本流水线架构: $(uname -m)"
+      mkdir -p "$PWD/dist"
+      bash /usr/local/bin/build-kkfileview.sh \
+        --version "${RELEASE_VERSION}" \
+        --ref "${RELEASE_REF}" \
+        --maven-mirror "${MAVEN_MIRROR}" \
+        --repo-url "${KK_REPO_URLS}" \
+        --output "$PWD/dist"
+
+  - name: list-and-check
+    script: |
+      set -e
+      ls -lh "$PWD/dist"
+      echo "===== BUILD-INFO.txt ====="
+      cat "$PWD/dist/BUILD-INFO.txt" 2>/dev/null || true
+
+  # 打自包含发行包（注入 install.sh / systemd 服务 / 许可证）
+  - name: package-dist
+    script: |
+      set -e
+      bash package-dist.sh --dist "$PWD/dist"
+      ls -lh "$PWD/dist"
+
+  # 生成 Release 说明
+  - name: gen-notes
+    script: |
+      set -e
+      cat > RELEASE_NOTES.md <<EOF
+      ## ${RELEASE_TITLE}
+
+      kkFileView ${RELEASE_VERSION}，在 CNB 上从源码编译（Maven 3.9 + Temurin JDK 21，
+      源码 tag \`v${RELEASE_VERSION}\`），并打包为**自包含发行包**（内置 install.sh 与 systemd 服务文件）。
+
+      ### 发行包
+
+      | 文件 | 说明 |
+      |------|------|
+      | \`kkfileview-${RELEASE_VERSION}.tar.gz\` | 解压后 \`sudo ./install.sh --start\` 即可离线安装/原地升级 |
+      | \`kkFileView-${RELEASE_VERSION}.jar\` | 原始 Spring Boot fat jar（自行集成用） |
+      | \`SHA256SUMS\` | 校验和 |
+      | \`BUILD-INFO.txt\` | 版本 / 源码 commit / 工具链 / jar 校验和 |
+
+      ### 容器镜像（CNB 制品库，amd64）
+
+      \`\`\`bash
+      docker login docker.cnb.cool -u cnb
+      docker pull ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${RELEASE_VERSION}
+      docker run -d --name kkfileview -p 8012:8012 ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:${RELEASE_TAG}
+      # 打开 http://<host>:8012/
+      \`\`\`
+
+      镜像 = Ubuntu 24.04 + OpenJDK 21 + LibreOffice（libreoffice-nogui）+ 中文字体
+      （文泉驿 / Noto CJK）+ 时区 Asia/Shanghai + locale zh_CN.UTF-8，以非 root 用户运行，
+      内置 HEALTHCHECK（\`/actuator/health\`）。
+
+      多架构（含 arm64）镜像由 GitHub Actions 发布到 GHCR；arm64 下上游 JavaCV 的
+      ffmpeg/opencv 原生库缺失，视频转码类预览不可用（Office/PDF/图片/CAD 正常）。
+
+      ### 运行前置条件（裸机安装）
+
+      * JDK 21 或更高版本
+      * LibreOffice：\`apt-get install -y libreoffice-nogui\`
+        （kkFileView 的 OfficePluginManager 是 @PostConstruct，**找不到 office.home 会直接启动失败**）
+
+      ### 说明
+
+      本项目仅提供构建与打包流水线，kkFileView 源码版权归上游所有（Apache-2.0），
+      发行包内附 \`LICENSE.kkfileview.txt\`。
+      EOF
+      cat RELEASE_NOTES.md
+
+  # 幂等 + 并发安全地确保 Release 存在
+  - name: ensure-release
+    script: |
+      set -e
+      TAG="${RELEASE_TAG:?缺少 RELEASE_TAG}"
+      NAME="${RELEASE_TITLE:-$TAG}"
+      MK="${RELEASE_MAKE_LATEST:-false}"
+      API="https://api.cnb.cool/${CNB_REPO_SLUG}/-/releases"
+      H_AUTH="Authorization: Bearer ${CNB_TOKEN}"
+      H_ACC="Accept: application/vnd.cnb.api+json"
+
+      # 从 releases 列表里提取指定 tag 的 release id
+      # 注意：CNB API 的 GET/POST/PATCH 都必须带 Accept: application/vnd.cnb.api+json，
+      #       只带 Content-Type 会返回 406
+      rel_id() {
+        curl -s -m 30 -H "$H_AUTH" -H "$H_ACC" "${API}" \
+          | tr -d ' \t\n' \
+          | grep -oE "\"id\":\"[0-9]+\",\"tag_name\":\"$1\"" \
+          | head -n 1 | grep -oE '[0-9]+' || true
+      }
+
+      BODY=$(sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g' RELEASE_NOTES.md)
+
+      echo ">>> 确保 Release 存在: ${TAG}（make_latest=${MK}）"
+      OK="no"
+      for attempt in 1 2 3 4 5; do
+        ID="$(rel_id "$TAG")"
+        if [ -n "$ID" ]; then
+          echo ">>> Release 已存在（id=${ID}），更新标题与描述"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 30 -X PATCH \
+            -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+            "${API}/${ID}" \
+            -d "{\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"make_latest\":\"${MK}\"}") || HTTP="000"
+          echo ">>> PATCH 结果: HTTP ${HTTP}"
+          OK="yes"
+          break
+        fi
+
+        echo ">>> 不存在，创建（第 ${attempt} 次尝试）"
+        HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" -m 30 -X POST \
+          -H "$H_AUTH" -H "Content-Type: application/json" -H "$H_ACC" \
+          "${API}" \
+          -d "{\"tag_name\":\"${TAG}\",\"name\":\"${NAME}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"${MK}\",\"target_commitish\":\"${CNB_COMMIT:-main}\"}") || HTTP="000"
+        echo ">>> POST 结果: HTTP ${HTTP}"
+        case "$HTTP" in
+          200|201) OK="yes"; break ;;
+          409|422) echo ">>> 并发创建冲突，视为已存在"; OK="yes"; break ;;
+        esac
+        head -c 300 /tmp/rel.json 2>/dev/null || true
+        echo
+        echo ">>> 第 ${attempt} 次失败，3s 后重试"
+        sleep 3
+      done
+      [ "$OK" = "yes" ] || { echo "!!! Release 创建失败（tag=${TAG}）"; exit 1; }
+      echo ">>> Release ${TAG} 就绪"
+
+  # 上传发行包为 Release 附件
+  - name: upload-attachments
+    image: cnbcool/attachments:latest
+    settings:
+      tag: ${RELEASE_TAG}
+      attachments:
+        - "./dist/*.tar.gz"
+        - "./dist/*.jar"
+        - "./dist/SHA256SUMS"
+        - "./dist/BUILD-INFO.txt"
+
+  # 构建运行时镜像并推送到 CNB 制品库
+  # 用 docker:27-cli 作为该 stage 的镜像，确保有 docker CLI；
+  # 实际的 daemon 由流水线级 services: [docker] 提供，并已自动登录制品库。
+  - name: push-image
+    image: docker:27-cli
+    script: |
+      set -e
+      REG="${CNB_DOCKER_REGISTRY:-docker.cnb.cool}"
+      IMG="${REG}/${CNB_REPO_SLUG_LOWERCASE}"
+      echo ">>> 推送镜像: ${IMG}（版本 ${RELEASE_VERSION} / tag ${RELEASE_TAG}）"
+      echo ">>> 工作目录: $PWD"
+      test -f Dockerfile.runtime || { echo "!!! 未在当前目录找到 Dockerfile.runtime"; ls -la; exit 1; }
+      test -f "dist/kkfileview-${RELEASE_VERSION}.tar.gz" || { echo "!!! 缺少 dist/kkfileview-${RELEASE_VERSION}.tar.gz"; ls -la dist; exit 1; }
+
+      # 显式登录（services: docker 通常已自动登录，这里作为兜底，失败不致命）
+      if [ -n "${CNB_TOKEN:-}" ]; then
+        echo "${CNB_TOKEN}" | docker login -u "${CNB_TOKEN_USER_NAME:-cnb}" --password-stdin "${REG}" \
+          || echo ">>> 警告：docker login 失败，继续尝试推送（可能已自动登录）"
+      fi
+
+      docker build \
+        -f Dockerfile.runtime \
+        --build-arg "KK_VERSION=${RELEASE_VERSION}" \
+        -t "${IMG}:${RELEASE_VERSION}" \
+        -t "${IMG}:${RELEASE_TAG}" \
+        .
+      docker push "${IMG}:${RELEASE_VERSION}"
+      docker push "${IMG}:${RELEASE_TAG}"
+      echo ">>> 镜像推送完成: ${IMG}:${RELEASE_VERSION} / ${IMG}:${RELEASE_TAG}"
+
+  # 汇总
+  - name: summary
+    script: |
+      echo "事件        : CNB_IS_TAG=${CNB_IS_TAG:-false} CNB_BRANCH=${CNB_BRANCH}"
+      echo "kkFileView  : ${RELEASE_VERSION}"
+      echo "源码 ref    : ${RELEASE_REF}"
+      echo "Release     : ${RELEASE_TAG}"
+      ls -lh "$PWD/dist" 2>/dev/null || true
+
+# ── 主线：main / master 分支 push ─────────────────────────────────────────
+main:
+  push:
+    - name: mainline
+      <<: *build-env
+      env:
+        <<: *vars
+      stages: *stages
+
+master:
+  push:
+    - name: mainline
+      <<: *build-env
+      env:
+        <<: *vars
+      stages: *stages
+
+# ── 稳定版：git tag 推送（glob 匹配 v*） ──────────────────────────────────
+"v*":
+  tag_push:
+    - name: stable
+      <<: *build-env
+      env:
+        <<: *vars
+      stages: *stages

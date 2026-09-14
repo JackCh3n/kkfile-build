@@ -1,0 +1,12 @@
+# 说明：运行时镜像（Dockerfile.runtime）需要 dist/kkfileview-<版本>.tar.gz，
+# 所以这里只排除体积大的中间产物，不能整目录排除 dist/。
+.git
+.github
+.workbuddy
+.build
+*.log
+.env
+# dist 下的中间产物（保留 *.tar.gz）
+dist/kkFileView-*/
+dist/*.jar
+dist/SHA256SUMS

@@ -1,0 +1,7 @@
+# 编译镜像（Dockerfile）只需要 build-kkfileview.sh 一个文件，
+# 用「白名单」把构建上下文压到几十 KB，避免每次构建都上传几百 MB 的 dist/。
+# 说明：该文件是 BuildKit 的「按 Dockerfile 生效」的 ignore 文件
+#       （<Dockerfile 名>.dockerignore）；旧版 BuildKit 不支持时会自动回退到 .dockerignore，
+#       只影响上下文体积，不影响构建正确性。
+*
+!build-kkfileview.sh

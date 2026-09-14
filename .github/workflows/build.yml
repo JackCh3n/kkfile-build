@@ -1,0 +1,442 @@
+# =============================================================================
+# kkfile-build · GitHub Actions 构建流水线
+#
+# 做什么
+# ------
+#   1) 在 Docker 里从源码编译 kkFileView（Maven + JDK 21），产出自包含发行包
+#   2) 构建运行时镜像（Ubuntu 24.04 + JRE21 + LibreOffice + 中文字体）并推送到 GHCR
+#   3) 在 GitHub Releases 上发布发行包（tar.gz / jar / SHA256SUMS）+ 镜像说明
+#   4) 可选：把镜像同步到 CNB 制品库（配置 secrets.CNB_TOKEN 与 vars.CNB_REPO_SLUG 后生效）
+#
+# 场景与版本语义
+# --------------
+#   * push 到 main/master -> 主线：构建 KK_VERSION 指定的稳定版本（默认 5.0.2，
+#     从 tag v5.0.2 取源码，保证可复现），滚动发布到 Release tag `latest`，
+#     镜像打 `latest` 与 `<版本>` 两个 tag
+#   * push tag v*         -> 稳定版：从 tag 名解析版本，发布到同名 Release（固化），
+#     镜像打 `<版本>` 与 `v<版本>` 两个 tag
+#   * workflow_dispatch   -> 手动：可指定版本 / git ref / 平台 / 是否推镜像
+#
+# 架构说明
+#   * `linux/amd64` 为默认且功能完整（JavaCV 的 ffmpeg/opencv 原生库上游只提供
+#     x86_64，缺失会让 avi/mov/rmvb 等视频转码不可用）
+#   * `linux/arm64` 通过 buildx + QEMU 交叉构建（apt 装 LibreOffice 在模拟下较慢，
+#     单架构约十几分钟）；如只需 amd64，用 workflow_dispatch 把 platforms 改为
+#     `linux/amd64` 可显著缩短时间
+#   * 若仓库为 public，可把 image job 改成在 `ubuntu-24.04-arm` 原生 ARM runner
+#     上分别构建两个架构，再用 `docker buildx imagetools create` 合并 manifest
+# =============================================================================
+name: build-kkfileview
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "kkFileView 版本号（同时决定源码 tag v<版本>）"
+        required: false
+        default: "5.0.2"
+      ref:
+        description: "git ref（留空 = v<版本>；可填 master / v5.0.1 / commit）"
+        required: false
+        default: ""
+      platforms:
+        description: "镜像平台"
+        type: choice
+        options:
+          - linux/amd64
+          - linux/amd64,linux/arm64
+        default: linux/amd64,linux/arm64
+      push_image:
+        description: "是否构建并推送镜像"
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+# 发布 Release 与推送 GHCR 都需要写权限
+permissions:
+  contents: write
+  packages: write
+
+# 同一分支/tag 的构建串行化，避免并发更新同一个 Release 附件时互相覆盖
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 主线默认构建的版本；上游发新版本时改这里即可
+  KK_VERSION: "5.0.2"
+  # 源码地址：按顺序尝试（GitHub 优先，Gitee 作兜底）
+  KK_REPO_URLS: "https://github.com/kekingcn/kkFileView.git https://gitee.com/kekingcn/file-online-preview.git"
+  # GitHub runner 访问 Maven Central 更快，这里不用国内镜像
+  MAVEN_MIRROR: central
+
+jobs:
+  # ── 解析场景 / 版本 / 发布目标 ──────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      scene: ${{ steps.resolve.outputs.scene }}
+      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      title: ${{ steps.resolve.outputs.title }}
+      make_latest: ${{ steps.resolve.outputs.make_latest }}
+      platforms: ${{ steps.resolve.outputs.platforms }}
+      push_image: ${{ steps.resolve.outputs.push_image }}
+    steps:
+      - id: resolve
+        name: 解析构建场景
+        run: |
+          set -e
+          SCENE=""; VERSION=""; REF=""; RELEASE_TAG=""; TITLE=""; MAKE_LATEST="false"
+          PLATFORMS="linux/amd64,linux/arm64"
+          PUSH_IMAGE="yes"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SCENE="dispatch"
+            VERSION="${{ github.event.inputs.version }}"; VERSION="${VERSION:-$KK_VERSION}"
+            REF="${{ github.event.inputs.ref }}"
+            PLATFORMS="${{ github.event.inputs.platforms }}"; PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
+            PUSH_IMAGE="${{ github.event.inputs.push_image }}"; PUSH_IMAGE="${PUSH_IMAGE:-yes}"
+            [ -n "$REF" ] || REF="v$VERSION"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            SCENE="tag"
+            REF="${{ github.ref_name }}"
+            case "$REF" in
+              v*) VERSION="${REF#v}" ;;
+              *) echo "::error::tag 必须以 v 开头（例如 v5.0.2），当前为 $REF"; exit 1 ;;
+            esac
+          else
+            SCENE="mainline"
+            VERSION="$KK_VERSION"
+            REF="v$VERSION"
+            MAKE_LATEST="true"
+          fi
+
+          case "$REF" in
+            v*) RELEASE_TAG="$REF" ;;
+            *)  RELEASE_TAG="v$VERSION" ;;
+          esac
+          case "$SCENE" in
+            mainline) RELEASE_TAG="latest"; TITLE="kkFileView $VERSION (latest)" ;;
+            tag)      TITLE="kkFileView $VERSION" ;;
+            *)        TITLE="kkFileView $VERSION" ;;
+          esac
+
+          echo ">>> 场景=$SCENE 版本=$VERSION ref=$REF Release=$RELEASE_TAG 平台=$PLATFORMS 推镜像=$PUSH_IMAGE"
+          {
+            echo "scene=$SCENE"
+            echo "version=$VERSION"
+            echo "ref=$REF"
+            echo "release_tag=$RELEASE_TAG"
+            echo "title=$TITLE"
+            echo "make_latest=$MAKE_LATEST"
+            echo "platforms=$PLATFORMS"
+            echo "push_image=$PUSH_IMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+  # ── 编译 + 打包 ────────────────────────────────────────────────────────
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 缓存 Maven 依赖（JavaCV/ffmpeg 等包体较大）
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ hashFiles('build-kkfileview.sh', 'Dockerfile') }}
+          restore-keys: |
+            m2-${{ runner.os }}-
+
+      - name: 构建编译镜像
+        run: docker buildx build --load -t kkfileview-builder:local -f Dockerfile .
+
+      - name: 从源码编译 kkFileView ${{ needs.prepare.outputs.version }}
+        run: |
+          set -e
+          mkdir -p dist "$HOME/.m2"
+          docker run --rm \
+            -v "$HOME/.m2:/root/.m2" \
+            -v "$PWD/dist:/opt/dist" \
+            kkfileview-builder:local \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --ref "${{ needs.prepare.outputs.ref }}" \
+            --maven-mirror "$MAVEN_MIRROR" \
+            --repo-url "$KK_REPO_URLS" \
+            --output /opt/dist
+          # 容器内以 root 写入，回收属主后再打包
+          sudo chown -R "$(id -u):$(id -g)" dist
+
+      - name: 打包自包含发行包
+        run: bash package-dist.sh --dist dist
+
+      - name: 展示产物
+        run: |
+          set -e
+          ls -lh dist
+          echo "===== BUILD-INFO.txt ====="
+          cat dist/BUILD-INFO.txt || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kkfileview-dist
+          path: |
+            dist/kkfileview-*.tar.gz
+            dist/kkFileView-*.jar
+            dist/SHA256SUMS
+            dist/BUILD-INFO.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  # ── 构建并推送运行时镜像 ────────────────────────────────────────────────
+  image:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.push_image == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载发行包
+        uses: actions/download-artifact@v4
+        with:
+          name: kkfileview-dist
+          path: dist
+
+      - name: 规整产物路径（防止 artifact 内部层级差异）
+        run: |
+          set -e
+          if [ -d dist/dist ]; then cp -a dist/dist/. dist/ && rm -rf dist/dist; fi
+          ls -lh dist
+
+      - name: 计算镜像名与 tags
+        id: meta
+        run: |
+          set -e
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
+          V="${{ needs.prepare.outputs.version }}"
+          {
+            echo "image=$IMG"
+            echo "tags<<__TAGS__"
+            echo "${IMG}:${V}"
+            echo "${IMG}:v${V}"
+            if [ "${{ needs.prepare.outputs.scene }}" = "mainline" ]; then
+              echo "${IMG}:latest"
+            fi
+            echo "__TAGS__"
+          } >> "$GITHUB_OUTPUT"
+          echo ">>> 镜像: $IMG  版本: $V"
+          sed -n '/^tags<</,/^__TAGS__$/p' "$GITHUB_OUTPUT"
+
+      - name: 注册 QEMU（构建异架构镜像用）
+        if: contains(needs.prepare.outputs.platforms, 'arm64')
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 准备 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送运行时镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          platforms: ${{ needs.prepare.outputs.platforms }}
+          build-args: |
+            KK_VERSION=${{ needs.prepare.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          labels: |
+            org.opencontainers.image.title=kkFileView
+            org.opencontainers.image.description=kkFileView 文档在线预览服务（源码构建）
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: 同步推送到 CNB 制品库（可选）
+        # 说明：GitHub Actions 的 if 里不能引用 secrets 上下文（会报
+        # Unrecognized named-value: 'secrets'），所以这里只按 vars 判断，
+        # token 是否存在交给脚本自己判断。
+        # 需要配置 vars.CNB_REPO_SLUG（本仓库为 jackch3n/kkfile-build）
+        # 与 secrets.CNB_TOKEN（CNB 访问令牌）
+        if: ${{ vars.CNB_REPO_SLUG != '' }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_SLUG: ${{ vars.CNB_REPO_SLUG }}
+        run: |
+          set -e
+          if [ -z "${CNB_TOKEN:-}" ]; then
+            echo ">>> 未配置 secrets.CNB_TOKEN，跳过镜像同步"
+            exit 0
+          fi
+          TARGET="docker.cnb.cool/${CNB_SLUG,,}"
+          echo "$CNB_TOKEN" | docker login docker.cnb.cool -u cnb --password-stdin
+          # imagetools 直接跨仓库搬运 manifest，不拉取镜像层，适合做镜像同步
+          for t in ${{ steps.meta.outputs.tags }}; do
+            suffix="${t##*:}"
+            echo ">>> 同步 $t -> ${TARGET}:${suffix}"
+            docker buildx imagetools create --tag "${TARGET}:${suffix}" "$t"
+          done
+
+  # ── 端到端冒烟测试：拉取刚推送的镜像，起容器探活 ────────────────────────
+  # health 为 UP 说明进程起得来，也顺带证明镜像里的 LibreOffice 被正确识别
+  # （kkFileView 找不到 office.home 会在启动阶段直接退出）。
+  smoke:
+    needs: [prepare, image]
+    if: needs.prepare.outputs.push_image == 'yes' && contains(needs.prepare.outputs.platforms, 'amd64')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉取镜像
+        run: |
+          set -e
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}:${{ needs.prepare.outputs.version }}"
+          echo ">>> docker pull $IMG"
+          docker pull "$IMG"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      - name: 冒烟测试
+        run: bash smoke-test.sh "$IMG" --timeout 300
+
+  # ── 发布 Release ───────────────────────────────────────────────────────
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载发行包
+        uses: actions/download-artifact@v4
+        with:
+          name: kkfileview-dist
+          path: dist
+
+      - name: 规整产物路径（防止 artifact 内部层级差异）
+        run: |
+          set -e
+          if [ -d dist/dist ]; then cp -a dist/dist/. dist/ && rm -rf dist/dist; fi
+          ls -lh dist
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCENE: ${{ needs.prepare.outputs.scene }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          TITLE: ${{ needs.prepare.outputs.title }}
+          MAKE_LATEST: ${{ needs.prepare.outputs.make_latest }}
+        run: |
+          set -e
+          TARBALL="dist/kkfileview-${VERSION}.tar.gz"
+          JAR="dist/kkFileView-${VERSION}.jar"
+          FILES=""
+          for f in "$TARBALL" "$JAR" "dist/SHA256SUMS" "dist/BUILD-INFO.txt"; do
+            if [ -f "$f" ]; then FILES="$FILES $f"; else echo ">>> 缺少 $f，跳过"; fi
+          done
+          [ -n "$FILES" ] || { echo "::error::没有任何可发布的产物"; exit 1; }
+
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          cat > notes.md <<EOF
+          ## ${TITLE}
+
+          kkFileView ${VERSION}，在 Docker 中从源码编译（Maven 3.9 + Temurin JDK 21，
+          源码 tag \`v${VERSION}\`），并打包为**自包含发行包**（内置 install.sh 与 systemd 服务文件）。
+
+          ### 发行包
+
+          | 文件 | 说明 |
+          |------|------|
+          | \`kkfileview-${VERSION}.tar.gz\` | 解压后 \`sudo ./install.sh --start\` 即可离线安装/原地升级 |
+          | \`kkFileView-${VERSION}.jar\` | 原始 Spring Boot fat jar（自行集成用） |
+          | \`SHA256SUMS\` | 校验和 |
+          | \`BUILD-INFO.txt\` | 版本 / 源码 commit / 工具链 / jar 校验和 |
+
+          ### 容器镜像
+
+          \`\`\`bash
+          docker pull ${IMG}:${VERSION}
+          docker run -d --name kkfileview -p 8012:8012 ${IMG}:${VERSION}
+          # 打开 http://<host>:8012/
+          \`\`\`
+
+          镜像 = Ubuntu 24.04 + OpenJDK 21 + LibreOffice（libreoffice-nogui）+ 中文字体
+          （文泉驿 / Noto CJK）+ 时区 Asia/Shanghai + locale zh_CN.UTF-8，以非 root 用户运行，
+          内置 HEALTHCHECK（\`/actuator/health\`）。
+
+          ### 运行前置条件（裸机安装）
+
+          * JDK 21 或更高版本
+          * LibreOffice：\`apt-get install -y libreoffice-nogui\`
+            （kkFileView 的 OfficePluginManager 是 @PostConstruct，**找不到 office.home 会直接启动失败**）
+
+          ### 说明
+
+          * 默认架构 \`linux/amd64\`；如启用 arm64，注意上游 JavaCV 的 ffmpeg/opencv 原生库
+            只有 x86_64 版本，arm64 下视频转码类预览不可用（Office/PDF/图片/CAD 正常）。
+          * 本项目仅提供构建与打包流水线，kkFileView 源码版权归上游所有（Apache-2.0），
+            发行包内附 \`LICENSE.kkfileview.txt\`。
+          EOF
+
+          publish() {
+            local tag="$1"
+            if gh release view "$tag" --json id -q .id >/dev/null 2>&1; then
+              echo ">>> Release $tag 已存在，更新附件与说明"
+              # 先删掉同名旧附件，避免 --clobber 在部分场景下留下重复项
+              gh release view "$tag" --json assets -q '.assets[]?.name' | while read -r f; do
+                [ -z "$f" ] && continue
+                aid="$(gh release view "$tag" --json assets -q ".assets[] | select(.name==\"$f\") | .id")"
+                [ -n "$aid" ] && gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${aid}" >/dev/null 2>&1 || true
+              done
+              for f in $FILES; do gh release upload "$tag" "$f" --clobber; done
+              gh release edit "$tag" --title "$TITLE" --notes-file notes.md --draft=false
+            else
+              echo ">>> 创建 Release $tag"
+              # shellcheck disable=SC2086
+              gh release create "$tag" $FILES \
+                --title "$TITLE" --notes-file notes.md \
+                --target "$GITHUB_SHA" --latest="$MAKE_LATEST"
+            fi
+          }
+
+          publish "$RELEASE_TAG"
+
+      - name: 汇总
+        run: |
+          echo "场景        : ${{ needs.prepare.outputs.scene }}"
+          echo "kkFileView  : ${{ needs.prepare.outputs.version }}"
+          echo "源码 ref    : ${{ needs.prepare.outputs.ref }}"
+          echo "Release     : ${{ needs.prepare.outputs.release_tag }}"
+          echo "镜像平台    : ${{ needs.prepare.outputs.platforms }}"
+          ls -lh dist 2>/dev/null || true
