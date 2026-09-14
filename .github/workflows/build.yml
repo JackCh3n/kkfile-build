@@ -73,9 +73,12 @@ permissions:
   contents: write
   packages: write
 
-# 同一分支/tag 的构建串行化，避免并发更新同一个 Release 附件时互相覆盖
+# 同一分支/tag + 同一版本的构建串行化，避免并发更新同一个 Release 附件时互相覆盖。
+# 分组里带上 version：手动触发构建多个不同版本时可以并行（各写各的 Release，
+# 互不覆盖）；同分支同版本仍然串行。注意 GitHub 对同一分组只保留一个排队中的运行，
+# 其余会被取消，所以不区分版本的话「一次dispatch多个版本」会互相挤掉。
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event.inputs.version || 'push' }}
   cancel-in-progress: false
 
 env:
