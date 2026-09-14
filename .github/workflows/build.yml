@@ -157,8 +157,21 @@ jobs:
           restore-keys: |
             m2-${{ runner.os }}-
 
+      # Docker Hub 匿名拉取偶尔限流/被重置（曾出现 auth.docker.io 连接被 reset），
+      # 重试 3 次，避免一次网络抖动让整条流水线变红
       - name: 构建编译镜像
-        run: docker buildx build --load -t kkfileview-builder:local -f Dockerfile .
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo ">>> 构建编译镜像（第 ${attempt}/3 次尝试）"
+            if docker buildx build --load -t kkfileview-builder:local -f Dockerfile .; then
+              exit 0
+            fi
+            echo ">>> 第 ${attempt} 次失败，30s 后重试"
+            sleep 30
+          done
+          echo "::error::编译镜像构建连续 3 次失败（多为 Docker Hub 拉取限流/抖动）"
+          exit 1
 
       - name: 从源码编译 kkFileView ${{ needs.prepare.outputs.version }}
         run: |
