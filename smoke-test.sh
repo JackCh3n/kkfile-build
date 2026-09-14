@@ -11,8 +11,9 @@
 #   ./smoke-test.sh <镜像> [--port N] [--timeout SEC] [--keep] [--no-office-check]
 #
 # 探活路径（可用环境变量 HEALTH_PATHS 覆盖，空格分隔）：
-#   * 4.x 没有 spring-boot-starter-actuator -> 用首页 /（HTTP 2xx）
-#   * 5.x 有 actuator                      -> /actuator/health 返回 {"status":"UP"}
+#   * 4.2.0 起与 5.x -> 首页 /（HTTP 2xx）
+#   * 4.1.0          -> 没有 "/" 映射，只有 /index（4.2.0 才加了 /）
+#   * 5.x            -> /actuator/health 返回 {"status":"UP"}（4.x 没有 actuator）
 #   任意一条成立即视为服务可用；命中哪条会打印出来。
 #   由于 kkFileView 启动强依赖 LibreOffice（office.home 缺失会直接退出），
 #   探活成功也顺带证明镜像里的 LibreOffice 被正确识别。
@@ -29,7 +30,7 @@ HOST_PORT=""
 TIMEOUT=300
 KEEP="no"
 OFFICE_CHECK="yes"
-HEALTH_PATHS="${HEALTH_PATHS:-/ /actuator/health}"
+HEALTH_PATHS="${HEALTH_PATHS:-/ /index /actuator/health}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
