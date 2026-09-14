@@ -39,6 +39,9 @@ OPT_OFFLINE_SRC="${KK_OFFLINE_SRC:-}"
 OPT_VERIFY="yes"
 OPT_KEEP_SRC="no"
 OPT_ALLOW_MISMATCH="no"
+# 编译所需的最小 JDK 版本：main 分支的项目是 Java 21（maven.compiler.release=21），
+# 4.x 分支是 Java 8；由各分支的默认值 / --min-java 决定
+MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-21}"
 
 # ---------- 运行期状态 ----------
 SRC_DIR=""
@@ -73,6 +76,7 @@ usage() {
   --jobs N             Maven 并行线程数（-T N，默认 1 表示不启用）
   --offline-src DIR    直接使用已有的源码目录，跳过克隆
   --no-verify          跳过编译后的静态校验（不推荐）
+  --min-java N         编译所需最小 JDK 版本（默认 21；4.x 源码需要 8）
   --allow-mismatch     允许 --version 与 pom.xml 中的版本号不一致（默认报错）
   --keep-src           保留克隆出来的源码目录
   -h, --help           显示本帮助
@@ -95,6 +99,7 @@ while [ $# -gt 0 ]; do
     --jobs)           OPT_JOBS="${2:?--jobs 需要参数}"; shift 2 ;;
     --offline-src)    OPT_OFFLINE_SRC="${2:?--offline-src 需要参数}"; shift 2 ;;
     --no-verify)      OPT_VERIFY="no"; shift ;;
+    --min-java)       MIN_JAVA_MAJOR="${2:?--min-java 需要参数}"; shift 2 ;;
     --allow-mismatch) OPT_ALLOW_MISMATCH="yes"; shift ;;
     --keep-src)       OPT_KEEP_SRC="yes"; shift ;;
     -h|--help)        usage; exit 0 ;;
@@ -133,8 +138,8 @@ check_toolchain() {
   case "$major" in
     ''|*[!0-9]*) die "无法识别 java 版本：$(java -version 2>&1 | head -n1)" ;;
   esac
-  # 项目 maven.compiler.release=21，字节码版本 65，运行时必须是 JDK/JRE 21+
-  [ "$major" -ge 21 ] || die "需要 JDK 21 或更高版本，当前为 $major（可用 JAVA_HOME 指向 JDK 21）"
+  # 编译所需 JDK 下限：main=21（maven.compiler.release=21），4.x=8
+  [ "$major" -ge "$MIN_JAVA_MAJOR" ] || die "需要 JDK ${MIN_JAVA_MAJOR} 或更高版本，当前为 $major（可用 JAVA_HOME 指向 ${MIN_JAVA_MAJOR} 的 JDK）"
 
   log "工具链: $(java -version 2>&1 | head -n1)"
   log "工具链: $(mvn -v 2>/dev/null | head -n1) / git $(git --version | awk '{print $3}')"

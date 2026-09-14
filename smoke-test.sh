@@ -10,6 +10,13 @@
 # 用法：
 #   ./smoke-test.sh <镜像> [--port N] [--timeout SEC] [--keep] [--no-office-check]
 #
+# 探活路径（可用环境变量 HEALTH_PATHS 覆盖，空格分隔）：
+#   * 5.x 有 spring-boot-starter-actuator -> /actuator/health 返回 {"status":"UP"}
+#   * 4.x 没有 actuator 依赖             -> 退化为访问首页 / （HTTP 2xx）
+#   任意一条成立即视为服务可用；命中哪条会打印出来。
+#   由于 kkFileView 启动强依赖 LibreOffice（office.home 缺失会直接退出），
+#   探活成功也顺带证明镜像里的 LibreOffice 被正确识别。
+#
 # 退出码：0 = 通过；非 0 = 失败（并输出容器日志尾部）
 # =============================================================================
 set -euo pipefail
@@ -22,6 +29,7 @@ HOST_PORT=""
 TIMEOUT=300
 KEEP="no"
 OFFICE_CHECK="yes"
+HEALTH_PATHS="${HEALTH_PATHS:-/actuator/health /}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -76,8 +84,30 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" -p "${HOST_PORT}:8012" "$IMAGE" >/dev/null
 
 # ---------- 3) 轮询健康检查 ----------
-HEALTH_URL="http://127.0.0.1:${HOST_PORT}/actuator/health"
-log "轮询 ${HEALTH_URL}（最长 ${TIMEOUT}s）"
+log "探活 http://127.0.0.1:${HOST_PORT}/，路径: ${HEALTH_PATHS}（最长 ${TIMEOUT}s）"
+
+# 依次尝试各探活路径；成功时把命中的判据打到 stdout
+probe_once() {
+  local p resp code body
+  for p in $HEALTH_PATHS; do
+    resp="$(curl -s -m 5 -w '\n%{http_code}' "http://127.0.0.1:${HOST_PORT}${p}" 2>/dev/null || true)"
+    code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    case "$p" in
+      */actuator/health)
+        case "$body" in
+          *'"status":"UP"'*) printf '%s 返回 status=UP' "$p"; return 0 ;;
+        esac
+        ;;
+      *)
+        case "$code" in
+          2*) printf '%s 返回 HTTP %s' "$p" "$code"; return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  return 1
+}
 
 deadline=$(( $(date +%s) + TIMEOUT ))
 ok="no"
@@ -87,21 +117,21 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     dump_logs
     die "容器已退出（启动失败）"
   fi
-  body="$(curl -fsS -m 5 "$HEALTH_URL" 2>/dev/null || true)"
-  case "$body" in
-    *'"status":"UP"'*)
-      log "健康检查通过: $body"
-      ok="yes"
-      break
-      ;;
-  esac
+  if msg="$(probe_once)"; then
+    log "健康检查通过: ${msg}"
+    ok="yes"
+    break
+  fi
   sleep 5
 done
 
 if [ "$ok" != "yes" ]; then
   dump_logs
-  die "等待 ${TIMEOUT}s 后 /actuator/health 仍未返回 UP"
+  die "等待 ${TIMEOUT}s 后 ${HEALTH_PATHS} 均未通过"
 fi
+
+# 打印启动完成日志行作为佐证（4.x / 5.x 都有这一行）
+docker logs "$NAME" 2>&1 | grep -m1 '服务启动完成' | sed 's/^/    /' || true
 
 # ---------- 4) 首页可访问性 ----------
 if curl -fsS -m 10 -o /dev/null "http://127.0.0.1:${HOST_PORT}/"; then

@@ -46,6 +46,8 @@ KEEP_CONFIG="yes"
 JAVA_HOME_ARG=""
 PKG_DIR_ARG=""
 FROM_TARBALL=""
+# 运行所需最小 Java 版本：main 分支的产物是 Java 21 字节码，4.x 分支是 Java 8
+MIN_JAVA_MAJOR="${MIN_JAVA_MAJOR:-21}"
 
 # ---------- 运行期状态 ----------
 PKG_DIR=""
@@ -75,6 +77,7 @@ kkFileView 离线安装 / 升级
       --user NAME      运行用户             (默认 kkfileview)
       --port N         服务端口             (默认 8012)
       --java-home DIR  指定 JAVA_HOME（须为 JDK/JRE 21+）
+      --min-java N     运行所需最小 Java 版本（默认 21；4.x 产物需要 8）
 
 来源与行为:
       --pkg DIR        指定解包后的发行目录（默认取脚本所在目录）
@@ -99,6 +102,7 @@ while [ $# -gt 0 ]; do
     --user)          RUN_USER="${2:?--user 需要参数}"; shift 2 ;;
     --port)          PORT="${2:?--port 需要参数}"; shift 2 ;;
     --java-home)     JAVA_HOME_ARG="${2:?--java-home 需要参数}"; shift 2 ;;
+    --min-java)      MIN_JAVA_MAJOR="${2:?--min-java 需要参数}"; shift 2 ;;
     --pkg)           PKG_DIR_ARG="${2:?--pkg 需要参数}"; shift 2 ;;
     --from)          FROM_TARBALL="${2:?--from 需要参数}"; shift 2 ;;
     --install-office) INSTALL_OFFICE="yes"; shift ;;
@@ -193,7 +197,7 @@ check_java() {
   case "$major" in
     ''|*[!0-9]*) die "无法识别 Java 版本：$("$JAVA_BIN" -version 2>&1 | head -n1)" ;;
   esac
-  [ "$major" -ge 21 ] || die "需要 Java 21 或更高版本（当前 $major）：$JAVA_BIN"
+  [ "$major" -ge "$MIN_JAVA_MAJOR" ] || die "需要 Java ${MIN_JAVA_MAJOR} 或更高版本（当前 $major）：$JAVA_BIN"
   log "Java: $("$JAVA_BIN" -version 2>&1 | head -n1) [$JAVA_BIN]"
 }
 

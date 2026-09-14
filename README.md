@@ -65,7 +65,7 @@ Ubuntu 24.04 + OpenJDK 21 + LibreOffice（`libreoffice-nogui`）+ 中文字体
 | 来源 | 镜像地址 | 架构 |
 | --- | --- | --- |
 | GitHub Actions | `ghcr.io/jackch3n/kkfile-build:<版本>`（主线另有 `:latest`） | `linux/amd64`（可选含 `linux/arm64`） |
-| CNB | `docker.cnb.cool/jackch3n/kkfile-build:<版本>`（主线另有 `:latest`） | `linux/amd64` |
+| CNB | `docker.cnb.cool/jackch3n/kkfile-build:<版本>`（主线另有 `:latest`） | `linux/amd64` + `linux/arm64` |
 
 ---
 
@@ -150,7 +150,7 @@ sudo ./install.sh --from /path/to/kkfileview-5.0.2.tar.gz --start
 ./build.sh package                 # 打成自包含 tar.gz + SHA256SUMS
 ./build.sh image  [版本] [平台]     # 构建运行时镜像 kkfileview:<版本>
 ./build.sh all    [版本]            # 编译 + 打包 + 构建镜像
-./build.sh smoke  [镜像tag]         # 冒烟测试（起容器 + 探活 /actuator/health）
+./build.sh smoke  [镜像tag]         # 冒烟测试（起容器 + 探活）
 ./build.sh push   <镜像tag> ...     # 推送镜像
 ./build.sh native [版本] [mirror]   # 宿主机原生编译，不依赖 Docker
 ./build.sh shell                    # 进编译镜像交互式排障
@@ -198,8 +198,9 @@ docker run --rm \
    避免产出「文件名写 5.0.2、里面其实是别的版本」
 3. **静态校验**：`unzip -t` 校验 jar 完整性、确认 `BOOT-INF/classes/cn/keking/ServerMain.class`
    与 `BOOT-INF/lib/` 存在、jar 体积下限
-4. **运行时冒烟测试**（`build.sh smoke` / CI）：起容器并轮询 `/actuator/health`，
-   为 `UP` 说明进程正常启动 —— 也就顺带证明镜像里的 LibreOffice 被识别到了
+4. **运行时冒烟测试**（`build.sh smoke` / CI）：起容器并探活 —— 5.x 走
+   `/actuator/health`（`status=UP`），4.x 没有 actuator 依赖则退化为访问首页 `/`（HTTP 2xx），
+   并打印日志里的「服务启动完成」作为佐证
 
 ---
 
@@ -255,27 +256,35 @@ Actions → build-kkfileview → Run workflow，可指定：
 
 | 触发 | 场景 | 源码 ref | Release tag | 镜像 tag |
 | --- | --- | --- | --- | --- |
-| push `main` / `master` | 主线 | `v<KK_VERSION>` | `latest`（滚动更新） | `<版本>`、`latest` |
-| push tag `v*` | 稳定版 | 该 tag | 同名 tag | `<版本>`、`<tag>` |
+| push `main` / `master` | 主线 | `v<KK_VERSION>` | `latest`（滚动更新） | `<版本>`、`latest`（多架构） |
+| push tag `v*` | 稳定版 | 该 tag | 同名 tag | `<版本>`、`<tag>`（多架构） |
 
-阶段链：`resolve-scene → build-kkfileview → list-and-check → package-dist →
-gen-notes → ensure-release → upload-attachments → push-image → summary`。
+每次触发会起**两条并行流水线**（amd64 / arm64 各一条），共用的阶段链是：
+`resolve-scene → build-kkfileview → list-and-check → package-dist →
+gen-notes → ensure-release → upload-attachments → push-image-arch → merge-manifest → summary`，
+其中 `gen-notes / ensure-release / upload-attachments` 只在 amd64 流水线执行（带 stage 级 `if`）。
 
 * 编译环境用流水线级 `docker.build`（引用本仓库 `Dockerfile`），由 CNB 负责构建缓存，
-  所以每个 stage 都直接跑在「Maven + JDK 21」镜像里
+  所以每个 stage 都直接跑在「Maven + JDK」镜像里
 * Release 用 CNB REST API 幂等创建（并发/重跑安全），附件用 `cnbcool/attachments`
 * 镜像推送到 CNB 制品库，`services: docker` 注入的 dind 已自动登录，无需配置密钥
 
-### 为什么 CNB 只发 amd64 镜像
+### 镜像为什么是双架构、怎么合的
 
-在 dind 里跑 `docker-container` 驱动的多架构 `buildx` 依赖 privileged/binfmt，
-稳定性无法保证。所以分工是：
+CNB 侧用**两条并行流水线**分别跑 `cnb:arch:amd64` 与 `cnb:arch:arm64:v8` runner：
+各自原生编译、原生构建本架构镜像并推 `:<版本>-amd64` / `:<版本>-arm64`，
+然后由先看到对方架构的那条流水线用 `docker buildx imagetools create`
+把两个架构合并成 `:<版本>` / `:latest` 多架构 manifest（幂等，谁先合都一样）。
 
-* **多架构镜像（含 arm64）** → GitHub Actions 发到 GHCR
-* **国内可直连的单架构镜像 + Release** →  CNB 发到 `docker.cnb.cool`
+不用「一条流水线 + QEMU 多架构 buildx」的原因：QEMU 下 apt 安装 LibreOffice 要
+20~40 分钟，而在 dind 里跑 `docker-container` 驱动的多架构 buildx 还依赖
+privileged/binfmt，稳定性没保证。两条原生流水线并行只要约 10 分钟，且是原生镜像。
 
-需要 CNB 侧也有 arm64 镜像时，把流水线 `runner.tags` 换成 `cnb:arch:arm64:v8`
-再跑一次即可（源码编译产物与架构无关，镜像会按本机架构构建）。
+如果 arm64 那条流水线失败，amd64 流水线等待 30 分钟后会退化为发布单架构镜像并给出
+警告（不会让流水线变红）；arm64 恢复后下一次构建会自动重新合并。
+
+来源包（tar.gz/jar）与 Release 附件只由 amd64 流水线发布一次 —— 编译产物与架构无关，
+避免两条流水线抢同一个 Release。
 
 > 若所在 CNB 环境不支持 dind（`push-image` 阶段报找不到 docker 或无法连接守护进程），
 > 把 `.cnb.yml` 里最后的 `push-image` 阶段整段删掉即可：发行包与 Release 照常发布，
