@@ -26,8 +26,9 @@ ARG BUILDER_IMAGE=maven:3.9-eclipse-temurin-21
 FROM ${BUILDER_IMAGE}
 
 # APT 镜像（Ubuntu/Debian 两种 sources 格式都做了兼容），留空表示用基础镜像默认源。
-# 仅用于安装 git/curl 等工具；不改变 Maven 依赖下载源。
-ARG APT_MIRROR=https://mirrors.aliyun.com
+# 用 http 即可：deb 包有 GPG 签名，http 传输不影响完整性（https 还要求镜像里
+# 预置 ca-certificates，裸基础镜像没有）。这里不改变 Maven 依赖下载源。
+ARG APT_MIRROR=http://mirrors.aliyun.com
 
 ENV DEBIAN_FRONTEND=noninteractive
 

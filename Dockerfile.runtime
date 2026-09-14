@@ -28,8 +28,11 @@ FROM ${RUNTIME_BASE}
 
 # 发行包版本，必须显式传入（tar 包名里带版本号）
 ARG KK_VERSION
-# APT 镜像（Ubuntu 24.04 的 deb822 格式），留空表示用官方源
-ARG APT_MIRROR=https://mirrors.aliyun.com
+# APT 镜像（Ubuntu 24.04 的 deb822 格式），留空表示用官方源。
+# 注意默认用 **http** 而不是 https：ubuntu:24.04 基础镜像不带 ca-certificates，
+# https 源会因 "No system certificates available" 握手失败，所有包都报
+# "Unable to locate"。deb 包本身有 GPG 签名，http 传输不影响完整性校验。
+ARG APT_MIRROR=http://mirrors.aliyun.com
 # 是否安装微软核心字体：ttf-mscorefonts-installer 构建期需访问 sourceforge，
 # 国内网络易失败，故默认关闭；对 Word 排版保真度要求高时置为 yes。
 ARG INSTALL_MS_FONTS=no
@@ -39,6 +42,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     test -n "${KK_VERSION}" || { echo "!! 必须通过 --build-arg KK_VERSION=<版本> 指定版本"; exit 1; }; \
     if [ -n "${APT_MIRROR}" ]; then \
+      case "${APT_MIRROR}" in \
+        https://*) \
+          # 确需 https 源：先从默认 http 源装上 ca-certificates 再切源
+          apt-get update; \
+          apt-get install -y --no-install-recommends ca-certificates; \
+          rm -rf /var/lib/apt/lists/*; \
+          ;; \
+      esac; \
       sed -i -E "s@https?://(archive|security|ports)\.ubuntu\.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
       grep -q 'universe' /etc/apt/sources.list.d/ubuntu.sources || \
         sed -i -E 's@^Components:.*@Components: main restricted universe multiverse@' /etc/apt/sources.list.d/ubuntu.sources; \

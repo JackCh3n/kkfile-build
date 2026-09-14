@@ -53,7 +53,8 @@
         - Dockerfile
         - build-kkfileview.sh
       buildArgs:
-        APT_MIRROR: https://mirrors.aliyun.com
+        # 注意用 http：见 Dockerfile.runtime 里关于 ca-certificates 的说明
+        APT_MIRROR: http://mirrors.aliyun.com
 
 # ── 默认版本（主线构建用；上游发新版时改这里） ─────────────────────────────
 .vars: &vars
